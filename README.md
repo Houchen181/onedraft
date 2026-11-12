@@ -1,0 +1,86 @@
+# Polycast
+
+An AI-native desktop app for running your own social media accounts from one place.
+Write a post once, let the assistant tailor it for each platform, approve it, and Polycast publishes or
+schedules it everywhere — YouTube, Bilibili, Rednote (小红书), Instagram, TikTok and X built in, and any
+other platform through a plugin or an MCP server.
+
+*Polycast is a working name.*
+
+## Run it
+
+```bash
+npm install
+npm run dev        # development, with hot reload
+npm run build && npm start   # production build
+npm test           # core tests (validation, publish state machine, media, OAuth, signing)
+```
+
+Windows 10/11 with Microsoft Edge (already installed) is all it needs; ffmpeg ships with it.
+Data lives in `%APPDATA%\polycast` (set `POLYCAST_DATA` to use another folder). Logins and API keys are
+encrypted with Windows' own protection (Electron `safeStorage`).
+
+## How it works
+
+```
+ Compose (master post) ──► per-account variants ──► validate against platform rules
+        ▲                                                   │
+   AI assistant ─┐                                          ▼
+   MCP clients ──┴─► same tool set ──► approval card ──► queue (SQLite state machine)
+                                                            │
+                         ┌──────────────┬──────────────┬────┴─────────┬───────────────┐
+                    official API     browser        CLI (biliup)    MCP bridge      plugin
+                  YouTube IG TikTok X   Rednote       Bilibili       any MCP server   any JS
+```
+
+- **One connector interface** (`src/core/connector.ts`): a manifest (capabilities, limits, settings,
+  per-post options, caveats) plus `connect / check / publish` and optional `listComments / reply / stats`.
+  The UI, the validator and the AI all read the same manifest.
+- **Five kinds of connector**: official API, browser automation (Playwright driving your installed Edge,
+  one persistent profile per account), CLI (biliup for Bilibili), MCP bridge (any MCP server that can post),
+  and plugins (`%APPDATA%\polycast\connectors\<name>\index.js`).
+- **Safe publishing**: the queue never re-sends something a platform may already have (`unconfirmed`),
+  backs off on rate limits, and uses the platform's own scheduler when it has one (YouTube, Bilibili,
+  Rednote), so your PC can be off at posting time. Otherwise Polycast keeps running in the tray.
+- **AI-native**: the built-in assistant (Claude) and any MCP client share 18 tools. Drafting, checking rules,
+  converting media (9:16, 3:4, blurred fill…) and reading comments happen freely; **publishing and replies
+  wait for your click** unless you turn on auto-approve.
+- **AI labels**: mark a post AI-generated and each connector sets that platform's disclosure
+  (`containsSyntheticMedia`, `is_aigc`, `made_with_ai`, `is_ai_generated`, Rednote's 内容类型声明).
+
+## Platform setup (personal use)
+
+| Platform | What you need | Caveats |
+|---|---|---|
+| YouTube | Google Cloud project → enable *YouTube Data API v3* → OAuth client type **Desktop app** → paste client ID/secret in Settings | While the OAuth app is in "Testing", Google expires logins every 7 days. 100 uploads/day. |
+| Bilibili | Nothing — Polycast downloads [biliup](https://github.com/biliup/biliup) (MIT) when you connect; scan the QR code in its window | AI declaration (创作声明) must be ticked in the creator centre. Native schedule 4 h–15 days ahead. |
+| Rednote | Nothing — a browser window opens; scan the QR code | Defaults to *handoff*: Polycast fills the note, you press 发布 (Rednote penalises automated accounts). |
+| Instagram | Meta app (Business) → Instagram → *API setup with Instagram login* → generate a token for your Business/Creator account; paste it when connecting | Images need a public media host (Settings; any S3-compatible bucket such as Cloudflare R2). |
+| TikTok | developers.tiktok.com app with Login Kit (Desktop) + Content Posting API; redirect `http://127.0.0.1:53682/callback/` | Until TikTok audits the app, posts are private and the account must be private. |
+| X | console.x.com app, OAuth 2.0 type **Native App**, callback `http://127.0.0.1:53682/callback` | Pay-per-use: ~$0.015/post, ~$0.20 with a link. |
+
+Research behind these choices: [docs/platform-research-2026-11.md](docs/platform-research-2026-11.md).
+
+## Use it from Claude Code
+
+Settings → *Use Polycast from Claude Code* → turn on the MCP server, then copy the command shown, e.g.
+
+```bash
+claude mcp add --transport http polycast http://127.0.0.1:7341/mcp --header "Authorization: Bearer <token>"
+```
+
+## Add a platform
+
+See [docs/writing-a-connector.md](docs/writing-a-connector.md) — a plugin is one `index.js`; an MCP bridge is a
+few lines of JSON. [examples/bluesky-plugin](examples/bluesky-plugin/index.js) is a complete example.
+
+## Layout
+
+```
+src/shared/      types shared by UI and main process
+src/core/        store (node:sqlite), engine (publish state machine), validation, media (ffmpeg), OAuth, tools
+src/connectors/  youtube, bilibili, rednote, instagram, tiktok, x, mcp-bridge, plugin loader
+src/main/        Electron main: IPC, browser profiles, AI agent, MCP server, tray, notifications
+src/renderer/    React UI: Compose, Posts, Accounts, Activity, Settings, assistant panel
+test/            vitest suite
+```

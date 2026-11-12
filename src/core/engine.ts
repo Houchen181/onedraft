@@ -1,0 +1,330 @@
+// The engine: accounts, posts, approval, and the publish state machine.
+//
+// Target lifecycle:  draft -> queued -> publishing -> published | scheduled | handoff
+//                                               \-> failed (retry by hand)
+//                                               \-> unconfirmed (never re-sent automatically)
+//                    queued -> (retryable error) -> queued with backoff
+//
+// Rules borrowed from the tools we studied:
+//  - never re-send something a platform may have accepted (Postiz's "unconfirmed")
+//  - typed errors decide retries (Postiz/Mixpost), backoff carries the next attempt time
+//  - prefer native scheduling: upload early, let the platform publish (social-auto-upload)
+
+import type { Account, Issue, MediaInfo, Post, PostDraft, Target } from '../shared/types'
+import {
+  ContentError,
+  NeedsLoginError,
+  RetryableError,
+  UnconfirmedError,
+  VerificationRequiredError,
+  type Connector,
+  type ConnectorContext
+} from './connector'
+import { probe, type MediaTools } from './media'
+import type { Registry } from './registry'
+import type { Store } from './store'
+import { resolveContent, validateContent, withOptionDefaults } from './validate'
+
+export interface ContextFactory {
+  (platform: string, account: Account | undefined, scope?: string, signal?: AbortSignal): ConnectorContext & {
+    /** Secrets written during connect() before the account exists. */
+    pendingSecrets(): unknown
+  }
+}
+
+/** Upload early with the platform's own scheduler when the post is at least this far out. */
+const NATIVE_SCHEDULE_MIN_LEAD_MS = 20 * 60_000
+const MAX_ATTEMPTS = 5
+
+/** Can this platform hold the post itself, given how far ahead it is? */
+function nativeScheduleFits(c: Connector, leadMs: number, minLeadMs = NATIVE_SCHEDULE_MIN_LEAD_MS): boolean {
+  const caps = c.manifest.capabilities
+  if (!caps.nativeSchedule) return false
+  const w = caps.scheduleWindow
+  const min = Math.max(minLeadMs, (w?.minSec ?? 0) * 1000)
+  const max = (w?.maxSec ?? 365 * 86400) * 1000
+  return leadMs >= min && leadMs <= max
+}
+
+export class Engine {
+  private running = new Set<string>()
+  private busyAccounts = new Set<string>()
+  private aborts = new Map<string, AbortController>()
+  maxConcurrent = 2
+
+  constructor(
+    public store: Store,
+    public registry: Registry,
+    public makeContext: ContextFactory,
+    public mediaTools: MediaTools
+  ) {}
+
+  connector(platform: string): Connector {
+    return this.registry.get(platform)
+  }
+
+  // ---------- accounts ----------
+
+  async connect(platform: string, input: Record<string, string>, signal?: AbortSignal): Promise<Account> {
+    const c = this.connector(platform)
+    for (const f of c.manifest.connectFields) {
+      if (f.required && !input[f.key]?.trim()) throw new Error(`${f.label} is required.`)
+    }
+    const ctx = this.makeContext(platform, undefined, `connect:${platform}`, signal)
+    const r = await c.connect(ctx, input)
+    const account = this.store.upsertAccount({
+      platform,
+      remoteUserId: r.remoteUserId,
+      name: r.name,
+      handle: r.handle,
+      avatarUrl: r.avatarUrl,
+      meta: r.meta
+    })
+    this.store.setAccountSecret(account.id, r.secrets ?? ctx.pendingSecrets())
+    this.store.log('info', `Connected ${c.manifest.name} account ${r.name}`, account.id)
+    return account
+  }
+
+  async checkAccount(id: string): Promise<Account> {
+    const account = this.mustAccount(id)
+    const c = this.connector(account.platform)
+    if (!c.check) return account
+    try {
+      const r = await c.check(this.makeContext(account.platform, account, account.id), account)
+      this.store.setAccountStatus(id, r.ok ? 'connected' : 'needs_login', r.note)
+    } catch (e) {
+      const needs = e instanceof NeedsLoginError || (e as Error)?.name === 'NeedsLoginError'
+      this.store.setAccountStatus(id, needs ? 'needs_login' : 'error', (e as Error).message)
+    }
+    return this.mustAccount(id)
+  }
+
+  async removeAccount(id: string) {
+    const account = this.mustAccount(id)
+    const c = this.registry.has(account.platform) ? this.connector(account.platform) : undefined
+    try {
+      await c?.disconnect?.(this.makeContext(account.platform, account, account.id), account)
+    } catch (e) {
+      this.store.log('warn', `Disconnect: ${(e as Error).message}`, id)
+    }
+    this.store.removeAccount(id)
+  }
+
+  mustAccount(id: string): Account {
+    const a = this.store.getAccount(id)
+    if (!a) throw new Error(`Unknown account ${id}`)
+    return a
+  }
+
+  // ---------- posts ----------
+
+  savePost(d: PostDraft): Post {
+    return this.store.savePost(d, (accountId) => this.store.getAccount(accountId)?.platform)
+  }
+
+  mustPost(id: string): Post {
+    const p = this.store.getPost(id)
+    if (!p) throw new Error(`Unknown post ${id}`)
+    return p
+  }
+
+  async probeAll(paths: string[]): Promise<{ infos: MediaInfo[]; issues: Issue[] }> {
+    const infos: MediaInfo[] = []
+    const issues: Issue[] = []
+    for (const p of paths) {
+      try {
+        infos.push(await probe(this.mediaTools, p))
+      } catch (e) {
+        issues.push({ level: 'error', field: 'media', message: (e as Error).message })
+      }
+    }
+    return { infos, issues }
+  }
+
+  async validateTarget(post: Post, t: Target): Promise<Issue[]> {
+    if (!this.registry.has(t.platform)) return [{ level: 'error', field: 'platform', message: `No connector for ${t.platform}.` }]
+    const c = this.connector(t.platform)
+    const content = withOptionDefaults(c.manifest, resolveContent(post, t))
+    const { infos, issues } = await this.probeAll(content.media)
+    const opts = content.options
+    for (const f of c.manifest.options) {
+      if (f.required && (opts[f.key] === undefined || opts[f.key] === '')) {
+        issues.push({ level: 'error', field: `options.${f.key}`, message: `Choose ${f.label} for ${c.manifest.name}.` })
+      }
+    }
+    const account = this.store.getAccount(t.accountId)
+    if (!account) issues.push({ level: 'error', field: 'account', message: 'Account was removed.' })
+    else if (account.status !== 'connected')
+      issues.push({ level: 'warning', field: 'account', message: `${account.name} needs to be reconnected.` })
+    return [...issues, ...validateContent(c.manifest, content, infos), ...(c.validate?.(content) ?? [])]
+  }
+
+  async validatePost(id: string): Promise<Record<string, Issue[]>> {
+    const post = this.mustPost(id)
+    const out: Record<string, Issue[]> = {}
+    for (const t of post.targets) out[t.id] = await this.validateTarget(post, t)
+    if (!post.targets.length) out['_'] = [{ level: 'error', field: 'targets', message: 'Pick at least one account.' }]
+    return out
+  }
+
+  /**
+   * Approve a post: queue every draft target. `publishAt` (ISO) schedules it; omitted = now.
+   * Throws if any target has blocking issues, listing them.
+   */
+  async approve(id: string, publishAt?: string): Promise<Post> {
+    const post = this.mustPost(id)
+    const when = publishAt ? new Date(publishAt) : undefined
+    if (when && Number.isNaN(when.getTime())) throw new Error(`Bad publish time "${publishAt}"`)
+    const drafts = post.targets.filter((t) => t.status === 'draft' || t.status === 'canceled')
+    if (!drafts.length) throw new Error('Nothing to approve: no draft targets on this post.')
+    const problems: string[] = []
+    for (const t of drafts) {
+      const errs = (await this.validateTarget(post, t)).filter((i) => i.level === 'error')
+      if (errs.length) problems.push(`${t.platform}: ${errs.map((e) => e.message).join(' ')}`)
+    }
+    if (problems.length) throw new Error(`Fix these first:\n${problems.join('\n')}`)
+    for (const t of drafts) {
+      const c = this.connector(t.platform)
+      const lead = when ? when.getTime() - Date.now() : 0
+      // Native scheduling: start the upload now; otherwise wait until the publish time.
+      const startAt = when && !nativeScheduleFits(c, lead) ? when : new Date()
+      this.store.setTarget(t.id, {
+        status: 'queued',
+        scheduledAt: when?.toISOString() ?? null,
+        error: null,
+        nextAttemptAt: startAt.toISOString()
+      })
+    }
+    this.store.log('info', `Approved "${post.title || post.body.slice(0, 40)}" for ${drafts.length} account(s)${when ? ` for ${when.toLocaleString()}` : ''}`, id)
+    return this.mustPost(id)
+  }
+
+  cancel(id: string): Post {
+    const post = this.mustPost(id)
+    for (const t of post.targets) {
+      if (t.status === 'queued' || t.status === 'draft') this.store.setTarget(t.id, { status: 'canceled', nextAttemptAt: null })
+      if (t.status === 'publishing') this.aborts.get(t.id)?.abort()
+    }
+    return this.mustPost(id)
+  }
+
+  /** Retry a failed target. Unconfirmed ones need `force` because they may already be live. */
+  retry(targetId: string, force = false) {
+    const t = this.store.getTarget(targetId)
+    if (!t) throw new Error(`Unknown target ${targetId}`)
+    if (t.status === 'unconfirmed' && !force)
+      throw new Error('This one may already be live. Check the platform first, then retry with force to post it again.')
+    if (!['failed', 'unconfirmed', 'canceled', 'handoff'].includes(t.status)) throw new Error(`Cannot retry a ${t.status} target.`)
+    this.store.setTarget(targetId, { status: 'queued', error: null, nextAttemptAt: new Date().toISOString() })
+  }
+
+  /** Called once at startup: anything left "publishing" may have gone through. */
+  recover() {
+    for (const t of this.store.stuckTargets()) {
+      this.store.setTarget(t.id, {
+        status: 'unconfirmed',
+        error: 'Polycast closed while this was publishing. Check the platform before retrying.'
+      })
+      this.store.log('warn', 'Interrupted while publishing; marked unconfirmed', t.postId)
+    }
+  }
+
+  // ---------- publishing ----------
+
+  /** Start every due target, within concurrency limits. Returns the ids started. */
+  tick(): string[] {
+    const started: string[] = []
+    for (const t of this.store.dueTargets()) {
+      if (this.running.size >= this.maxConcurrent) break
+      if (this.running.has(t.id) || this.busyAccounts.has(t.accountId)) continue
+      started.push(t.id)
+      void this.publishTarget(t.id)
+    }
+    return started
+  }
+
+  async publishTarget(targetId: string): Promise<void> {
+    const t = this.store.getTarget(targetId)
+    if (!t || this.running.has(targetId)) return
+    const post = this.store.getPost(t.postId)
+    const account = this.store.getAccount(t.accountId)
+    const scope = t.postId
+    if (!post || !account) {
+      this.store.setTarget(targetId, { status: 'failed', error: 'Post or account no longer exists.' })
+      return
+    }
+    // Too early to post and the platform can't hold it (e.g. a retry pushed us inside its window): wait.
+    if (t.scheduledAt && this.registry.has(t.platform)) {
+      const lead = new Date(t.scheduledAt).getTime() - Date.now()
+      if (lead > 60_000 && !nativeScheduleFits(this.connector(t.platform), lead, 2 * 60_000)) {
+        this.store.setTarget(targetId, { nextAttemptAt: t.scheduledAt })
+        return
+      }
+    }
+    this.running.add(targetId)
+    this.busyAccounts.add(account.id)
+    const abort = new AbortController()
+    this.aborts.set(targetId, abort)
+    const attempts = t.attempts + 1
+    this.store.setTarget(targetId, { status: 'publishing', attempts, error: null })
+    const label = `${account.platform}/${account.name}`
+    try {
+      const c = this.connector(t.platform)
+      const issues = (await this.validateTarget(post, t)).filter((i) => i.level === 'error' && i.field !== 'account')
+      if (issues.length) throw new ContentError(issues.map((i) => i.message).join(' '))
+      const content = withOptionDefaults(c.manifest, resolveContent(post, t))
+      const lead = t.scheduledAt ? new Date(t.scheduledAt).getTime() - Date.now() : 0
+      // The upload may run long; allow a smaller margin here than when deciding to start early.
+      const publishAt = t.scheduledAt && nativeScheduleFits(c, lead, 2 * 60_000) ? t.scheduledAt : undefined
+      this.store.log('info', `Publishing to ${label}${publishAt ? ` (scheduled on platform for ${publishAt})` : ''}`, scope)
+      const ctx = this.makeContext(t.platform, account, scope, abort.signal)
+      const r = await c.publish(ctx, account, { targetId, content, publishAt })
+      const status = r.state === 'scheduled' ? 'scheduled' : r.state === 'handoff' ? 'handoff' : 'published'
+      this.store.setTarget(targetId, { status, remoteId: r.remoteId ?? null, url: r.url ?? null, error: r.note ?? null, nextAttemptAt: null })
+      this.store.log('info', `${status === 'published' ? 'Published' : status === 'scheduled' ? 'Scheduled' : 'Ready for you to publish'} on ${label}${r.url ? `: ${r.url}` : ''}${r.note && !(r.url && r.note.includes(r.url)) ? ` (${r.note})` : ''}`, scope)
+    } catch (e) {
+      this.handleFailure(t, account, attempts, e as Error, abort.signal.aborted)
+    } finally {
+      this.running.delete(targetId)
+      this.busyAccounts.delete(account.id)
+      this.aborts.delete(targetId)
+    }
+  }
+
+  private handleFailure(t: Target, account: Account, attempts: number, e: Error, canceled: boolean) {
+    const scope = t.postId
+    const label = `${account.platform}/${account.name}`
+    if (canceled) {
+      this.store.setTarget(t.id, { status: 'unconfirmed', error: 'Canceled mid-publish. Check the platform before retrying.' })
+      this.store.log('warn', `Canceled while publishing to ${label}`, scope)
+      return
+    }
+    // Plugins written in plain JS signal the kind by error name, so match on either.
+    const is = (cls: { name: string; prototype: Error }, name: string) => e instanceof (cls as never) || e?.name === name
+    if (is(UnconfirmedError, 'UnconfirmedError')) {
+      this.store.setTarget(t.id, { status: 'unconfirmed', error: e.message, remoteId: (e as UnconfirmedError).remoteId ?? null })
+      this.store.log('warn', `${label}: ${e.message} (marked unconfirmed, will not re-send)`, scope)
+      return
+    }
+    if (is(NeedsLoginError, 'NeedsLoginError')) {
+      this.store.setAccountStatus(account.id, 'needs_login', e.message)
+      this.store.setTarget(t.id, { status: 'failed', error: `Reconnect ${account.name}, then retry. ${e.message}` })
+      this.store.log('error', `${label}: login expired`, scope)
+      return
+    }
+    if (is(RetryableError, 'RetryableError') && attempts < MAX_ATTEMPTS) {
+      const wait = ((e as RetryableError).retryAfterSec ?? 300) * 1000 * 2 ** (attempts - 1)
+      const next = new Date(Date.now() + wait).toISOString()
+      this.store.setTarget(t.id, { status: 'queued', error: `${e.message} (retrying at ${next})`, nextAttemptAt: next })
+      this.store.log('warn', `${label}: ${e.message}; retry ${attempts}/${MAX_ATTEMPTS - 1} at ${next}`, scope)
+      return
+    }
+    const kind = is(ContentError, 'ContentError') ? 'Content rejected' : is(VerificationRequiredError, 'VerificationRequiredError') ? 'Needs you' : 'Failed'
+    this.store.setTarget(t.id, { status: 'failed', error: `${kind}: ${e.message}`, nextAttemptAt: null })
+    this.store.log('error', `${label}: ${kind}: ${e.message}`, scope)
+  }
+
+  isBusy() {
+    return this.running.size > 0
+  }
+}

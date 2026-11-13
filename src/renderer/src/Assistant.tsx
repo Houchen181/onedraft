@@ -60,12 +60,14 @@ export function Assistant({ collapsed, onToggle, pending, onPendingTaken }: { co
   const [items, setItems] = useState<AgentItem[]>([])
   const [stream, setStream] = useState('')
   const [busy, setBusy] = useState(false)
+  const [engine, setEngine] = useState<string>()
   const [error, setError] = useState<string>()
   const [input, setInput] = useState('')
   const end = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    void call<{ items: AgentItem[]; busy: boolean }>('agent.history').then((h) => {
+    void call<{ items: AgentItem[]; busy: boolean; engine: string }>('agent.history').then((h) => {
+      setEngine(h.engine)
       setItems(h.items)
       setBusy(h.busy)
     })
@@ -118,6 +120,7 @@ export function Assistant({ collapsed, onToggle, pending, onPendingTaken }: { co
     <aside className="assistant">
       <header>
         <span>✨ Assistant</span>
+        {engine && <span className="pill" title={engine === "claude-code" ? "Runs on your Claude plan through Claude Code" : "Runs on a Claude API key"}>{engine === "claude-code" ? "Claude plan" : "API key"}</span>}
         {busy && <span className="pill accent">working…</span>}
         <span className="grow" />
         <button className="btn ghost sm" onClick={() => call('agent.reset')} title="Start a new conversation" disabled={busy}>

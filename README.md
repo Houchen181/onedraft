@@ -65,6 +65,21 @@ encrypted with Windows' own protection (Electron `safeStorage`).
 
 Research behind these choices: [docs/platform-research-2026-11.md](docs/platform-research-2026-11.md).
 
+## The assistant: your Claude plan or an API key
+
+Settings → AI → *Run the assistant on*:
+
+- **Your Claude plan (default when Claude Code is installed).** Polycast starts the Claude Code on this computer
+  (`claude`, signed in with your Pro/Max plan) with its built-in tools off and only Polycast's tools available
+  through a private local MCP server. It uses your plan's usage limits and needs no API key. Polycast never reads
+  or stores your Claude login, and removes any API key from Claude Code's environment so your plan is used.
+  Your personal hooks, plugins and skills are not loaded into these runs.
+  *For your own use:* Anthropic does not allow apps to offer Claude plan sign-in to other people, so a build
+  for other users should use API keys (or have them connect their own Claude app over MCP, below).
+- **A Claude API key**, billed per use (Messages API, Claude Opus 5.5 by default).
+
+Either way, publishing and replies still wait for your click.
+
 ## Use it from Claude Code
 
 Settings → *Use Polycast from Claude Code* → turn on the MCP server, then copy the command shown, e.g.

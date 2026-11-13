@@ -19,6 +19,7 @@ import type { ToolEnv } from '../core/tools'
 import type { ApprovalRequest, CompositionSpec, EditSpec, PostDraft } from '../shared/types'
 import { Agent, type AgentEvent } from './agent'
 import { BrowserManager } from './browser'
+import { claudeStatus, ClaudeCodeAgent, findClaude } from './claude-code'
 import { renderComposition } from './composer'
 import { makeContextFactory, settingString, type Paths } from './context'
 import { PolycastMcpServer } from './mcp-server'
@@ -134,8 +135,8 @@ async function main() {
     source
   })
 
-  // ---- agent ----
-  const agent = new Agent({
+  // ---- assistant: on the person's Claude plan (Claude Code) or with an API key ----
+  const apiAgent = new Agent({
     store,
     toolEnv: () => toolEnv('agent'),
     emit: (e: AgentEvent) => send('agent', e),
@@ -143,6 +144,28 @@ async function main() {
     model: () => settingString(store, 'ai.model') || 'claude-opus-5-5',
     effort: () => (settingString(store, 'ai.effort') as 'low' | 'medium' | 'high' | 'xhigh' | 'max') || 'medium'
   })
+  // A private MCP server only Polycast's own Claude Code runs know about (random port and token).
+  const assistantMcp = new PolycastMcpServer(() => toolEnv('agent'))
+  const assistantToken = randomBytes(24).toString('hex')
+  const claudeCli = () => findClaude(settingString(store, 'ai.claudePath'))
+  const ccAgent = new ClaudeCodeAgent({
+    store,
+    emit: (e: AgentEvent) => send('agent', e),
+    cli: claudeCli,
+    model: () => settingString(store, 'ai.ccModel') || undefined,
+    workDir: join(paths.data, 'claude-code'),
+    mcp: async () => {
+      if (!assistantMcp.running) await assistantMcp.start(0, assistantToken)
+      return { url: `http://127.0.0.1:${assistantMcp.port}/mcp`, token: assistantToken }
+    }
+  })
+  /** Which engine runs the assistant: the setting, else the Claude plan when Claude Code is installed. */
+  const engineName = (): 'claude-code' | 'api' => {
+    const s = settingString(store, 'ai.engine')
+    if (s === 'claude-code' || s === 'api') return s
+    return claudeCli() ? 'claude-code' : 'api'
+  }
+  const agent = () => (engineName() === 'claude-code' ? ccAgent : apiAgent)
 
   // ---- MCP server ----
   if (!store.getSetting('mcp.token')) store.setSetting('mcp.token', randomBytes(24).toString('hex'), true)
@@ -300,11 +323,17 @@ async function main() {
     },
     'connectors.reload': () => reloadExtensions(),
     'agent.send': (text: string) => {
-      void agent.send(text)
+      void agent().send(text)
     },
-    'agent.stop': () => agent.stop(),
-    'agent.reset': () => agent.reset(),
-    'agent.history': () => ({ items: agent.history(), busy: agent.busy }),
+    'agent.stop': () => agent().stop(),
+    'agent.reset': () => agent().reset(),
+    'agent.history': () => ({ items: agent().history(), busy: agent().busy, engine: engineName() }),
+    'ai.status': async () => ({
+      engine: engineName(),
+      engineSetting: settingString(store, 'ai.engine') ?? 'auto',
+      claude: await claudeStatus(claudeCli()),
+      apiKeySet: store.allSettings().secretsSet.includes('ai.apiKey')
+    }),
     'approvals.respond': (id: string, ok: boolean) => approvals.get(id)?.(ok),
     'events.list': (limit?: number, scope?: string) => store.listEvents(limit ?? 300, scope),
     'mcp.info': () => mcpInfo(),
@@ -346,6 +375,8 @@ async function main() {
   })
   app.on('will-quit', () => {
     void mcp.stop()
+    void assistantMcp.stop()
+    ccAgent.stop()
     void browsers.closeAll()
   })
   app.on('window-all-closed', () => {

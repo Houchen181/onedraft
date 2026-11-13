@@ -17,7 +17,7 @@ export type AgentEvent =
   | { type: 'busy'; busy: boolean }
   | { type: 'error'; message: string }
 
-const SYSTEM = `You are Polycast's assistant. Polycast is a desktop app that manages the user's own social media accounts (YouTube, Bilibili, Rednote/小红书, Instagram, TikTok, X, and any platform added as a plugin or MCP bridge). You act through the tools; you cannot see the screen.
+export const SYSTEM = `You are Polycast's assistant. Polycast is a desktop app that manages the user's own social media accounts (YouTube, Bilibili, Rednote/小红书, Instagram, TikTok, X, and any platform added as a plugin or MCP bridge). You act through the tools; you cannot see the screen.
 
 How to help with a post:
 1. list_accounts, then get_platform_rules for each platform involved. Respect every limit exactly (Rednote titles are 20 characters with English letters counting half; Bilibili titles 80; YouTube titles 100).
@@ -222,11 +222,11 @@ export class Agent {
 }
 
 function describe(e: unknown): string {
-  if (e instanceof Anthropic.AuthenticationError) return 'Claude API key missing or invalid: add it in Settings → AI.'
+  if (e instanceof Anthropic.AuthenticationError) return 'Claude API key missing or invalid: add it in Settings → AI, or switch to your Claude plan there.'
   if (e instanceof Anthropic.PermissionDeniedError) return `Claude API refused: ${e.message}`
   if (e instanceof Anthropic.RateLimitError) return 'Claude API rate limit reached; try again shortly.'
   if (e instanceof Anthropic.APIUserAbortError) return 'Stopped.'
   if (e instanceof Anthropic.APIError) return `Claude API error ${e.status ?? ''}: ${e.message}`
-  if (e instanceof Error && /api key|apiKey|authentication/i.test(e.message)) return 'Add your Claude API key in Settings → AI.'
+  if (e instanceof Error && /api key|apiKey|authentication/i.test(e.message)) return 'Add your Claude API key in Settings → AI, or switch the assistant to your Claude plan there.'
   return (e as Error)?.message ?? String(e)
 }

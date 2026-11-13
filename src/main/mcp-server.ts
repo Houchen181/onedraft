@@ -57,6 +57,12 @@ export class PolycastMcpServer {
     return !!this.http
   }
 
+  /** The port it listens on (useful after start(0)). */
+  get port(): number | undefined {
+    const a = this.http?.address()
+    return a && typeof a === 'object' ? a.port : undefined
+  }
+
   async start(port: number, token: string): Promise<void> {
     await this.stop()
     const expected = Buffer.from(`Bearer ${token}`)

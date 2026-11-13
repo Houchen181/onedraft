@@ -605,7 +605,8 @@ label.check {
 }
 .assistant .msgs {
   flex: 1;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: 14px;
   display: flex;
   flex-direction: column;
@@ -632,6 +633,8 @@ label.check {
   font-size: 13px;
 }
 .toolcall {
+  min-width: 0;
+  max-width: 100%;
   font-size: 12px;
   border: 1px solid var(--line-soft);
   border-radius: 8px;
@@ -653,6 +656,7 @@ label.check {
   border-top: 1px solid var(--line-soft);
   font-size: 11px;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .assistant .composer {
   border-top: 1px solid var(--line-soft);

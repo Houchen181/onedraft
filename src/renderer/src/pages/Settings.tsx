@@ -11,7 +11,41 @@ interface McpInfo {
   claudeCode: string
 }
 
-const AI_FIELDS: FieldSpec[] = [
+const ENGINE_FIELD: FieldSpec = {
+  key: 'ai.engine',
+  label: 'Run the assistant on',
+  type: 'select',
+  default: 'auto',
+  options: [
+    { value: 'auto', label: 'Automatic (my Claude plan if Claude Code is installed)' },
+    { value: 'claude-code', label: 'My Claude plan, through Claude Code on this computer' },
+    { value: 'api', label: 'A Claude API key (billed per use)' }
+  ]
+}
+
+const CC_FIELDS: FieldSpec[] = [
+  {
+    key: 'ai.ccModel',
+    label: 'Model',
+    type: 'select',
+    default: '',
+    options: [
+      { value: '', label: 'Claude Code’s default for my plan' },
+      { value: 'opus', label: 'Opus' },
+      { value: 'sonnet', label: 'Sonnet (uses less of the plan)' },
+      { value: 'haiku', label: 'Haiku' }
+    ]
+  },
+  { key: 'ai.claudePath', label: 'claude.exe path (optional)', type: 'path', help: 'Leave empty to find it on PATH or in %USERPROFILE%\\.local\\bin.' }
+]
+
+interface AiStatus {
+  engine: 'claude-code' | 'api'
+  claude: { found: boolean; path?: string; signedIn: boolean; method?: string; error?: string }
+  apiKeySet: boolean
+}
+
+const API_FIELDS: FieldSpec[] = [
   { key: 'ai.apiKey', label: 'Claude API key', type: 'secret', help: 'From platform.claude.com → API keys. Stored encrypted on this computer.' },
   {
     key: 'ai.model',
@@ -31,7 +65,10 @@ const AI_FIELDS: FieldSpec[] = [
     type: 'select',
     default: 'medium',
     options: ['low', 'medium', 'high', 'xhigh'].map((v) => ({ value: v, label: v }))
-  },
+  }
+]
+
+const AI_FIELDS: FieldSpec[] = [
   {
     key: 'ai.autoApprove',
     label: 'Let AI publish without asking me',
@@ -55,6 +92,40 @@ const APP_FIELDS: FieldSpec[] = [
   { key: 'app.ffmpegPath', label: 'ffmpeg path (optional)', type: 'path', help: 'Leave empty to use the bundled ffmpeg.' }
 ]
 
+function EngineStatus({ ai }: { ai: AiStatus }) {
+  const c = ai.claude
+  if (ai.engine === 'api')
+    return (
+      <div className="note">
+        Using a Claude API key {ai.apiKeySet ? <span className="pill ok">key saved</span> : <span className="pill warn">no key yet</span>}. Each request is billed to
+        your API account.
+      </div>
+    )
+  return (
+    <div className="note">
+      {!c.found ? (
+        <>
+          <span className="pill warn">Claude Code not found</span> Install Claude Code (claude.com/claude-code), run <code className="mono">claude</code> once and
+          sign in with your Claude plan.
+        </>
+      ) : c.signedIn ? (
+        <>
+          <span className="pill ok">Ready</span> Using your Claude plan through Claude Code ({c.method === 'claude.ai' ? 'signed in with claude.ai' : c.method}). Uses
+          your plan’s usage limits; no API key needed.
+        </>
+      ) : (
+        <>
+          <span className="pill warn">Not signed in</span> Run <code className="mono">claude</code> in a terminal and sign in with your Claude plan.
+        </>
+      )}
+      <div className="help" style={{ marginTop: 6 }}>
+        Polycast starts your own Claude Code with only Polycast’s tools and never sees your Claude login. For your own use: Anthropic doesn’t allow apps to offer
+        Claude plan sign-in to other people.
+      </div>
+    </div>
+  )
+}
+
 export function Settings() {
   const app = useApp()
   const { data: settings, reload } = useData<SettingsView>('settings.get', [])
@@ -62,8 +133,10 @@ export function Settings() {
   const [mcp, setMcp] = useState<McpInfo>()
   const [saving, setSaving] = useState(false)
 
+  const [ai, setAi] = useState<AiStatus>()
   useEffect(() => {
     void call<McpInfo>('mcp.info').then(setMcp)
+    void call<AiStatus>('ai.status').then(setAi)
   }, [settings])
 
   const value = (k: string) => (k in edits ? edits[k] : settings?.values[k])
@@ -71,6 +144,9 @@ export function Settings() {
   const isSecret = (k: string, spec?: FieldSpec) => spec?.type === 'secret'
 
   const allSpecs: FieldSpec[] = [
+    ENGINE_FIELD,
+    ...CC_FIELDS,
+    ...API_FIELDS,
     ...AI_FIELDS,
     ...HOST_FIELDS,
     ...APP_FIELDS,
@@ -132,7 +208,16 @@ export function Settings() {
 
       <div className="card">
         <h2>AI assistant</h2>
-        {fields(AI_FIELDS)}
+        <div className="stack">
+          <Field spec={ENGINE_FIELD} value={value('ai.engine')} onChange={(v) => set('ai.engine', v)} />
+          {ai && <EngineStatus ai={ai} />}
+          {(() => {
+            const chosen = String(value('ai.engine') ?? 'auto')
+            const engine = chosen === 'auto' ? ai?.engine : chosen
+            return engine === 'api' ? fields(API_FIELDS) : fields(CC_FIELDS)
+          })()}
+          {fields(AI_FIELDS)}
+        </div>
       </div>
 
       <div className="card">

@@ -42,9 +42,13 @@ encrypted with Windows' own protection (Electron `safeStorage`).
 - **Safe publishing**: the queue never re-sends something a platform may already have (`unconfirmed`),
   backs off on rate limits, and uses the platform's own scheduler when it has one (YouTube, Bilibili,
   Rednote), so your PC can be off at posting time. Otherwise Polycast keeps running in the tray.
-- **AI-native**: the built-in assistant (Claude) and any MCP client share 18 tools. Drafting, checking rules,
-  converting media (9:16, 3:4, blurred fill…) and reading comments happen freely; **publishing and replies
-  wait for your click** unless you turn on auto-approve.
+- **AI-native**: the built-in assistant (Claude) and any MCP client share 25 tools. Drafting, checking rules,
+  converting media (9:16, 3:4, blurred fill…), editing and generating video, and reading comments happen
+  freely; **publishing and replies wait for your click** unless you turn on auto-approve.
+- **Studio** ([docs/video.md](docs/video.md)): edit your own footage (trim, join, speed, text, burned-in captions,
+  music with ducking, logo, crossfades, loudness, one-click silence removal), or have Claude make a video.
+  Claude writes it as an HTML animation, Polycast renders it frame by frame to MP4, and it is always labelled
+  AI-generated. Claude can *see* your footage (`view_frames`) to pick highlights and check its own renders.
 - **AI labels**: mark a post AI-generated and each connector sets that platform's disclosure
   (`containsSyntheticMedia`, `is_aigc`, `made_with_ai`, `is_ai_generated`, Rednote's 内容类型声明).
 
@@ -78,9 +82,9 @@ few lines of JSON. [examples/bluesky-plugin](examples/bluesky-plugin/index.js) i
 
 ```
 src/shared/      types shared by UI and main process
-src/core/        store (node:sqlite), engine (publish state machine), validation, media (ffmpeg), OAuth, tools
+src/core/        store (node:sqlite), engine (publish state machine), validation, media + edit (ffmpeg), studio, OAuth, tools
 src/connectors/  youtube, bilibili, rednote, instagram, tiktok, x, mcp-bridge, plugin loader
-src/main/        Electron main: IPC, browser profiles, AI agent, MCP server, tray, notifications
-src/renderer/    React UI: Compose, Posts, Accounts, Activity, Settings, assistant panel
+src/main/        Electron main: IPC, browser profiles, AI agent, MCP server, HTML-to-video composer, Windows voices, tray
+src/renderer/    React UI: Compose, Studio, Posts, Accounts, Activity, Settings, assistant panel
 test/            vitest suite
 ```

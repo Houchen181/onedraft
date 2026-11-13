@@ -30,7 +30,7 @@ function describeMedia(i?: MediaInfo) {
   return parts.join(' · ')
 }
 
-export function Compose({ postId: initialId, onSaved }: { postId?: string; onSaved: (id: string | undefined) => void }) {
+export function Compose({ postId: initialId, seedMedia, onSaved }: { postId?: string; seedMedia?: string[]; onSaved: (id: string | undefined) => void }) {
   const app = useApp()
   const { data: accounts } = useData<Account[]>('accounts.list', [], ['accounts'])
   const [postId, setPostId] = useState<string | undefined>(initialId)
@@ -60,10 +60,13 @@ export function Compose({ postId: initialId, onSaved }: { postId?: string; onSav
     else {
       setPostId(undefined)
       setPost(undefined)
-      setM(EMPTY)
       setVariants({})
       setIssues({})
       setTab('master')
+      if (seedMedia?.length) {
+        // Started from Studio: AI-generated renders come pre-labelled.
+        void Promise.all(seedMedia.map((p) => call<boolean>('media.isAi', p))).then((ai) => setM({ ...EMPTY, media: seedMedia, aiGenerated: ai.some(Boolean) }))
+      } else setM(EMPTY)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialId])
@@ -296,7 +299,13 @@ export function Compose({ postId: initialId, onSaved }: { postId?: string; onSav
               </div>
               <div className="media-grid">
                 {m.media.map((p) => (
-                  <MediaTile key={p} path={p} info={describeMedia(infos[p])} onRemove={() => setMaster({ media: m.media.filter((x) => x !== p) })} />
+                  <MediaTile
+                    key={p}
+                    path={p}
+                    info={describeMedia(infos[p])}
+                    onRemove={() => setMaster({ media: m.media.filter((x) => x !== p) })}
+                    onEdit={isVideoPath(p) ? () => app.openStudio(p) : undefined}
+                  />
                 ))}
                 <div className="media add" onClick={pickMedia}>
                   + Add video or images
@@ -304,9 +313,16 @@ export function Compose({ postId: initialId, onSaved }: { postId?: string; onSav
               </div>
             </div>
             <label className="check">
-              <input type="checkbox" checked={m.aiGenerated} onChange={(e) => setMaster({ aiGenerated: e.target.checked })} />
+              <input
+                type="checkbox"
+                checked={m.aiGenerated || !!post?.aiGenerated}
+                disabled={!!post?.aiGenerated && !m.aiGenerated}
+                onChange={(e) => setMaster({ aiGenerated: e.target.checked })}
+              />
               <span>Made or substantially altered with AI</span>
-              <span className="faint small">sets each platform’s AI-content label</span>
+              <span className="faint small">
+                {post?.aiGenerated && !m.aiGenerated ? 'required: this post uses a video Claude generated' : 'sets each platform’s AI-content label'}
+              </span>
             </label>
           </div>
         ) : (

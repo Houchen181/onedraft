@@ -6,14 +6,26 @@ import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
-import { runTool, TOOLS, type ToolEnv } from '../core/tools'
+import { readFileSync } from 'node:fs'
+import { runTool, splitImages, TOOLS, type ToolEnv } from '../core/tools'
 
 function buildServer(env: () => ToolEnv): McpServer {
   const server = new McpServer({ name: 'polycast', version: '0.1.0' })
   for (const t of TOOLS) {
     server.registerTool(t.name, { description: t.description, inputSchema: t.schema.shape }, async (input: unknown) => {
       const r = await runTool(t.name, input, env())
-      return { content: [{ type: 'text' as const, text: JSON.stringify(r.result ?? null, null, 1) }], isError: !r.ok }
+      const { data, images } = splitImages(r.result)
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify(data ?? null, null, 1) },
+          ...images.map((img) => ({
+            type: 'image' as const,
+            data: readFileSync(img.path).toString('base64'),
+            mimeType: img.path.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg'
+          }))
+        ],
+        isError: !r.ok
+      }
     })
   }
   return server

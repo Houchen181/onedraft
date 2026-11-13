@@ -3,9 +3,14 @@
 
 import { DatabaseSync } from 'node:sqlite'
 import { randomUUID } from 'node:crypto'
+export type ChangeKind = 'posts' | 'accounts' | 'events' | 'projects'
+
 import type {
   Account,
   AccountStatus,
+  CompositionSpec,
+  EditProject,
+  EditSpec,
   LogEvent,
   Post,
   PostDraft,
@@ -78,6 +83,18 @@ create table if not exists events (
   scope text,
   message text not null
 );
+create table if not exists edits (
+  id text primary key,
+  name text not null,
+  kind text not null,
+  spec text,
+  composition text,
+  prompt text,
+  output text,
+  ai_generated integer not null default 0,
+  created_at text not null,
+  updated_at text not null
+);
 create table if not exists agent_messages (
   id integer primary key autoincrement,
   conversation text not null,
@@ -101,7 +118,7 @@ type Row = Record<string, unknown>
 
 export class Store {
   readonly db: DatabaseSync
-  private listeners = new Set<(kind: 'posts' | 'accounts' | 'events') => void>()
+  private listeners = new Set<(kind: ChangeKind) => void>()
 
   constructor(
     path: string,
@@ -112,11 +129,11 @@ export class Store {
     this.db.exec(SCHEMA)
   }
 
-  onChange(fn: (kind: 'posts' | 'accounts' | 'events') => void): () => void {
+  onChange(fn: (kind: ChangeKind) => void): () => void {
     this.listeners.add(fn)
     return () => this.listeners.delete(fn)
   }
-  private changed(kind: 'posts' | 'accounts' | 'events') {
+  private changed(kind: ChangeKind) {
     for (const fn of this.listeners) fn(kind)
   }
 
@@ -444,6 +461,55 @@ export class Store {
       scope: (r.scope as string) ?? undefined,
       message: r.message as string
     }))
+  }
+
+  // ---------- studio projects ----------
+
+  private toProject(r: Row): EditProject {
+    return {
+      id: r.id as string,
+      name: r.name as string,
+      kind: r.kind as EditProject['kind'],
+      spec: parse<EditSpec | undefined>(r.spec, undefined),
+      composition: parse<CompositionSpec | undefined>(r.composition, undefined),
+      prompt: (r.prompt as string) ?? undefined,
+      output: (r.output as string) ?? undefined,
+      aiGenerated: Boolean(r.ai_generated),
+      createdAt: r.created_at as string,
+      updatedAt: r.updated_at as string
+    }
+  }
+
+  listProjects(): EditProject[] {
+    return (this.db.prepare('select * from edits order by updated_at desc').all() as Row[]).map((r) => this.toProject(r))
+  }
+
+  getProject(id: string): EditProject | undefined {
+    const r = this.db.prepare('select * from edits where id = ?').get(id) as Row | undefined
+    return r ? this.toProject(r) : undefined
+  }
+
+  saveProject(p: Omit<EditProject, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }): EditProject {
+    const id = p.id ?? randomUUID()
+    const ts = now()
+    const exists = p.id ? this.db.prepare('select 1 from edits where id = ?').get(p.id) : undefined
+    const vals = [p.name, p.kind, p.spec ? json(p.spec) : null, p.composition ? json(p.composition) : null, p.prompt ?? null, p.output ?? null, p.aiGenerated ? 1 : 0]
+    if (exists) {
+      this.db
+        .prepare('update edits set name = ?, kind = ?, spec = ?, composition = ?, prompt = ?, output = ?, ai_generated = ?, updated_at = ? where id = ?')
+        .run(...vals, ts, id)
+    } else {
+      this.db
+        .prepare('insert into edits (name, kind, spec, composition, prompt, output, ai_generated, created_at, updated_at, id) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(...vals, ts, ts, id)
+    }
+    this.changed('projects')
+    return this.getProject(id)!
+  }
+
+  removeProject(id: string) {
+    this.db.prepare('delete from edits where id = ?').run(id)
+    this.changed('projects')
   }
 
   // ---------- agent conversation ----------

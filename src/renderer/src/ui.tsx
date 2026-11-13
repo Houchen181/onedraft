@@ -8,10 +8,14 @@ export interface AppCtx {
   toast(text: string, error?: boolean): void
   go(page: Page, postId?: string): void
   ask(text: string): void
+  /** Start a new post with these files. */
+  newPost(media: string[]): void
+  /** Open Studio with a new edit of this clip. */
+  openStudio(path?: string): void
   platforms: PlatformManifest[]
   platform(id: string): PlatformManifest | undefined
 }
-export type Page = 'compose' | 'posts' | 'accounts' | 'activity' | 'settings'
+export type Page = 'compose' | 'studio' | 'posts' | 'accounts' | 'activity' | 'settings'
 export const Ctx = createContext<AppCtx>(null as unknown as AppCtx)
 export const useApp = () => useContext(Ctx)
 
@@ -86,7 +90,7 @@ export function TagsInput({ value, onChange, placeholder }: { value: string[]; o
   )
 }
 
-export function MediaTile({ path, info, onRemove }: { path: string; info?: string; onRemove?: () => void }) {
+export function MediaTile({ path, info, onRemove, onEdit }: { path: string; info?: string; onRemove?: () => void; onEdit?: () => void }) {
   return (
     <div className="media" title={path}>
       {isVideoPath(path) ? <video src={mediaUrl(path)} muted preload="metadata" /> : <img src={mediaUrl(path)} alt="" />}
@@ -97,6 +101,11 @@ export function MediaTile({ path, info, onRemove }: { path: string; info?: strin
       {onRemove && (
         <button className="x" onClick={onRemove} title="Remove">
           ×
+        </button>
+      )}
+      {onEdit && (
+        <button className="x" style={{ right: 32 }} onClick={onEdit} title="Edit in Studio">
+          ✂
         </button>
       )}
     </div>

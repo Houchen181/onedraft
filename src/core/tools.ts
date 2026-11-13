@@ -4,12 +4,31 @@
 
 import { join } from 'node:path'
 import { z } from 'zod'
+import { detectScenes, detectSilences, evenTimes, extractFrames, speechSegments } from './edit'
 import type { Engine } from './engine'
 import { coverFrame, fit, probe } from './media'
+import type { Studio } from './studio'
 import { resolveContent } from './validate'
+
+/** Images a tool wants the model to see. Put them under this key in the result. */
+export const IMAGES = '__images'
+export interface ToolImage {
+  path: string
+  label?: string
+}
+
+/** Split a tool result into JSON-able data and images. */
+export function splitImages(result: unknown): { data: unknown; images: ToolImage[] } {
+  if (result && typeof result === 'object' && IMAGES in result) {
+    const { [IMAGES]: images, ...data } = result as Record<string, unknown>
+    return { data, images: (images as ToolImage[]) ?? [] }
+  }
+  return { data: result, images: [] }
+}
 
 export interface ToolEnv {
   engine: Engine
+  studio?: Studio
   mediaDir: string
   /** Ask the person in the app. Resolves true if they approve. */
   requestApproval(req: { title: string; detail: string; source: 'agent' | 'mcp' }): Promise<boolean>
@@ -116,7 +135,7 @@ export const TOOLS: ToolDef[] = [
       body: z.string().default(''),
       tags: z.array(z.string()).default([]),
       media: z.array(z.string()).default([]).describe('Absolute local file paths'),
-      aiGenerated: z.boolean().default(false).describe('True if the content was made or substantially altered by AI (sets platform disclosure labels)'),
+      aiGenerated: z.boolean().default(false).describe('True if the content was made or substantially altered by AI (sets platform disclosure labels). Forced on when any media comes from generate_video.'),
       accountIds: z.array(z.string()).min(1),
       variants: z.array(z.object({ accountId: z.string(), ...variantShape })).optional(),
       scheduledAt: z.string().optional().describe('ISO 8601 time to publish; omit for "as soon as approved"')
@@ -168,7 +187,7 @@ export const TOOLS: ToolDef[] = [
     description: "Set one account's platform-specific version of a post (title, caption, tags, media, cover, options). Fields you omit are kept.",
     schema: z.object({ targetId: z.string(), ...variantShape }),
     async run({ targetId, ...patch }, { engine }) {
-      const t = engine.store.updateTargetVariant(targetId, patch)
+      const t = engine.updateVariant(targetId, patch)
       const post = engine.mustPost(t.postId)
       return { target: t, resolved: resolveContent(post, t), issues: await engine.validateTarget(post, t) }
     }
@@ -199,8 +218,166 @@ export const TOOLS: ToolDef[] = [
       mode: z.enum(['crop', 'pad', 'blur']).default('blur'),
       maxSec: z.number().optional()
     }),
-    async run({ path, aspect, mode, maxSec }, { engine, mediaDir }) {
-      return fit(engine.mediaTools, path, { aspect, mode, maxSec, outDir: join(mediaDir, 'renditions') })
+    async run({ path, aspect, mode, maxSec }, { engine, mediaDir, studio }) {
+      // Renditions of AI-generated video stay labelled as AI-generated.
+      const outDir = studio?.isAiMedia(path) ? join(studio.generatedDir, 'renditions') : join(mediaDir, 'renditions')
+      return fit(engine.mediaTools, path, { aspect, mode, maxSec, outDir })
+    }
+  }),
+  def({
+    name: 'analyze_video',
+    description:
+      'Inspect a video before editing it: duration, size, whether it has sound, silent stretches (and the speech segments you get by cutting them out), and scene cuts. Times are seconds.',
+    schema: z.object({
+      path: z.string(),
+      noiseDb: z.number().default(-35).describe('Quieter than this counts as silence'),
+      minSilenceSec: z.number().default(0.6),
+      scenes: z.boolean().default(true).describe('Detect scene cuts (slow on long videos)')
+    }),
+    async run({ path, noiseDb, minSilenceSec, scenes }, { engine }) {
+      const info = await probe(engine.mediaTools, path)
+      const duration = info.durationSec ?? 0
+      const silences = info.hasAudio ? await detectSilences(engine.mediaTools, path, noiseDb, minSilenceSec) : []
+      return {
+        info,
+        silences: silences.map((s) => ({ start: s.start, end: Number.isFinite(s.end) ? s.end : duration })),
+        speechSegments: info.hasAudio ? speechSegments(duration, silences) : [],
+        sceneCuts: scenes && info.kind === 'video' && duration <= 1800 ? await detectScenes(engine.mediaTools, path) : undefined
+      }
+    }
+  }),
+  def({
+    name: 'view_frames',
+    description:
+      'Look at a video: returns still frames you can see, at evenly spaced times (count) or at the given times, labelled with their timestamps. Use it to understand what is in a clip, find the best moments and choose cut points.',
+    schema: z.object({
+      path: z.string(),
+      count: z.number().int().min(1).max(16).default(8),
+      times: z.array(z.number()).max(16).optional()
+    }),
+    async run({ path, count, times }, { engine, mediaDir }) {
+      const info = await probe(engine.mediaTools, path)
+      const ts = times?.length ? times : info.kind === 'image' ? [0] : evenTimes(info.durationSec ?? 1, count)
+      const frames = await extractFrames(engine.mediaTools, path, ts, join(mediaDir, 'frames'))
+      return { durationSec: info.durationSec, frames, [IMAGES]: frames.map((f) => ({ path: f.path, label: `t = ${f.t.toFixed(2)} s` })) }
+    }
+  }),
+  def({
+    name: 'edit_video',
+    description: `Edit human-shot or existing videos into a new MP4 (the original files are never changed). Pass the whole edit as a spec; it is saved as a Studio project the person can reopen and tweak, then rendered. Spec:
+- clips: [{src, in?, out?, speed?, volume?, mute?, durationSec? (images)}] played in order. Use analyze_video's speechSegments to cut silences, view_frames to choose moments.
+- aspect: '9:16' | '16:9' | '1:1' | '4:5' | '3:4' (default: the first clip's); fit: blur (default, blurred background) | crop | pad.
+- transitionSec: crossfade between clips (0 = hard cuts).
+- texts: [{text, start, end, position: top|center|bottom, size (fraction of frame height, default 0.045), color '#rrggbb', box}] — times on the OUTPUT timeline.
+- captions: [{start, end, text}] burned in at the bottom (output timeline).
+- music: {src, volume (default 0.25), duck (default true: lowers under speech)}; logo: {src, position, widthFraction, opacity}.
+- fadeInSec, fadeOutSec, normalizeAudio (-14 LUFS), longSide (default 1920), fps (default 30).
+Pass projectId to change an existing edit.`,
+    schema: z.object({
+      projectId: z.string().optional(),
+      name: z.string().optional(),
+      spec: z.object({
+        clips: z
+          .array(
+            z.object({
+              src: z.string(),
+              in: z.number().optional(),
+              out: z.number().optional(),
+              durationSec: z.number().optional(),
+              speed: z.number().optional(),
+              volume: z.number().optional(),
+              mute: z.boolean().optional()
+            })
+          )
+          .min(1),
+        aspect: z.string().optional(),
+        fit: z.enum(['crop', 'pad', 'blur']).optional(),
+        longSide: z.number().optional(),
+        fps: z.number().optional(),
+        transitionSec: z.number().optional(),
+        texts: z
+          .array(
+            z.object({
+              text: z.string(),
+              start: z.number(),
+              end: z.number(),
+              position: z.enum(['top', 'center', 'bottom']).optional(),
+              size: z.number().optional(),
+              color: z.string().optional(),
+              box: z.boolean().optional()
+            })
+          )
+          .optional(),
+        captions: z.array(z.object({ start: z.number(), end: z.number(), text: z.string() })).optional(),
+        music: z.object({ src: z.string(), volume: z.number().optional(), duck: z.boolean().optional() }).optional(),
+        logo: z
+          .object({
+            src: z.string(),
+            position: z.enum(['top-left', 'top-right', 'bottom-left', 'bottom-right']).optional(),
+            widthFraction: z.number().optional(),
+            opacity: z.number().optional()
+          })
+          .optional(),
+        fadeInSec: z.number().optional(),
+        fadeOutSec: z.number().optional(),
+        normalizeAudio: z.boolean().optional()
+      })
+    }),
+    async run({ projectId, name, spec }, { studio }) {
+      if (!studio) return { error: 'Video editing is not available here.' }
+      const p = studio.saveEdit({ id: projectId, name, spec })
+      const { project, info } = await studio.render(p.id)
+      return { projectId: project.id, output: project.output, aiGenerated: project.aiGenerated, durationSec: info.durationSec, width: info.width, height: info.height }
+    }
+  }),
+  def({
+    name: 'generate_video',
+    description: `Create an AI-generated video by writing it as HTML. Polycast renders the page frame by frame (deterministically) into an MP4 and labels it AI-generated.
+The page is sized width×height = 1080×1920 for 9:16, 1920×1080 for 16:9, 1080×1080 for 1:1, 1080×1350 for 4:5, 1080×1440 for 3:4 (also in window.POLYCAST {width,height,duration,fps}).
+Animate with CSS @keyframes / transitions or the Web Animations API, using animation-delay to place things in time; Polycast pauses every animation and sets its time for each frame. For canvas or JS-driven visuals define window.polycastSeek = (t) => { draw the frame at t seconds } (may be async). Do not rely on setTimeout, setInterval or requestAnimationFrame for timing. No network: inline everything (SVG, CSS, data: URIs); local images/videos can be used as file:///C:/... URLs. System fonts: "Segoe UI", "Microsoft YaHei" (Chinese), "Segoe UI Emoji".
+narration: {text, voice?, rate? (-10..10)} is spoken with a Windows voice (list_voices) and mixed in; keep it shorter than durationSec (≈ 2.5 words or 4 Chinese characters per second). music: {src, volume?}.
+Pass projectId to change an existing generated video. Rendering takes about 2 s per second of 30 fps video.`,
+    schema: z.object({
+      projectId: z.string().optional(),
+      name: z.string().optional(),
+      prompt: z.string().optional().describe("The person's request, kept with the project"),
+      html: z.string().min(20),
+      durationSec: z.number().min(0.5).max(600),
+      aspect: z.string().default('9:16'),
+      fps: z.number().int().min(12).max(60).optional(),
+      narration: z.object({ text: z.string(), voice: z.string().optional(), rate: z.number().optional() }).optional(),
+      music: z.object({ src: z.string(), volume: z.number().optional() }).optional()
+    }),
+    async run({ projectId, name, prompt, html, durationSec, aspect, fps, narration, music }, { studio }) {
+      if (!studio) return { error: 'Video generation is not available here.' }
+      const p = studio.saveGenerated({ id: projectId, name, prompt, composition: { html, durationSec, aspect, fps, narration, music } })
+      const { project, info } = await studio.render(p.id)
+      return { projectId: project.id, output: project.output, aiGenerated: true, durationSec: info.durationSec, width: info.width, height: info.height, hint: 'Check it with view_frames before using it in a post.' }
+    }
+  }),
+  def({
+    name: 'list_voices',
+    description: 'Windows voices available for narration (name, language, gender).',
+    schema: z.object({}),
+    async run(_i, { studio }) {
+      return studio ? studio.voices() : []
+    }
+  }),
+  def({
+    name: 'list_projects',
+    description: 'List Studio projects (video edits and generated videos) with their latest output files.',
+    schema: z.object({}),
+    async run(_i, { studio }) {
+      return (studio?.list() ?? []).map((p) => ({ id: p.id, name: p.name, kind: p.kind, output: p.output, aiGenerated: p.aiGenerated, updatedAt: p.updatedAt }))
+    }
+  }),
+  def({
+    name: 'get_project',
+    description: 'Get a Studio project with its full edit spec or HTML composition, to change and re-render it.',
+    schema: z.object({ projectId: z.string() }),
+    async run({ projectId }, { studio }) {
+      if (!studio) return { error: 'Studio is not available here.' }
+      return studio.get(projectId)
     }
   }),
   def({

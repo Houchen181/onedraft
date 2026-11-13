@@ -16,6 +16,87 @@ export interface MediaInfo {
   durationSec?: number
   sizeBytes: number
   codec?: string
+  hasAudio?: boolean
+}
+
+// ---------- video editing ----------
+
+/** One piece of the timeline. Video clips are cut to [in, out]; images are held for durationSec. */
+export interface EditClip {
+  src: string
+  in?: number
+  out?: number
+  /** For images (default 3 s). */
+  durationSec?: number
+  speed?: number
+  volume?: number
+  mute?: boolean
+}
+
+export interface EditText {
+  text: string
+  /** Seconds on the output timeline. */
+  start: number
+  end: number
+  position?: 'top' | 'center' | 'bottom'
+  /** Font size as a fraction of frame height (default 0.045). */
+  size?: number
+  color?: string
+  box?: boolean
+}
+
+export interface Caption {
+  start: number
+  end: number
+  text: string
+}
+
+/** A complete, re-renderable edit. Humans build it in Studio; the assistant writes it as JSON. */
+export interface EditSpec {
+  clips: EditClip[]
+  /** Output aspect like '9:16'. Default: the first clip's. */
+  aspect?: string
+  fit?: 'crop' | 'pad' | 'blur'
+  /** Long side in pixels (default 1920). */
+  longSide?: number
+  fps?: number
+  /** Crossfade between clips, seconds (0 = hard cuts). */
+  transitionSec?: number
+  texts?: EditText[]
+  /** Burned-in captions. */
+  captions?: Caption[]
+  music?: { src: string; volume?: number; duck?: boolean }
+  logo?: { src: string; position?: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'; widthFraction?: number; opacity?: number }
+  fadeInSec?: number
+  fadeOutSec?: number
+  /** Loudness-normalise to -14 LUFS (what most platforms target). */
+  normalizeAudio?: boolean
+}
+
+/** HTML-as-video that Claude writes; rendered frame by frame. */
+export interface CompositionSpec {
+  html: string
+  durationSec: number
+  aspect: string
+  fps?: number
+  longSide?: number
+  narration?: { text: string; voice?: string; rate?: number }
+  music?: { src: string; volume?: number }
+}
+
+export interface EditProject {
+  id: string
+  name: string
+  kind: 'edit' | 'generated'
+  spec?: EditSpec
+  composition?: CompositionSpec
+  /** What the person asked for (generated videos). */
+  prompt?: string
+  output?: string
+  /** Generated (or contains generated material): posts using it are labelled AI-generated. */
+  aiGenerated: boolean
+  createdAt: string
+  updatedAt: string
 }
 
 /** A form field the UI renders from a connector manifest (settings, connect form, post options). */

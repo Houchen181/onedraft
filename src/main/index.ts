@@ -3,22 +3,26 @@
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, Notification, protocol, safeStorage, shell, Tray } from 'electron'
 import { randomBytes, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import ffmpegStatic from 'ffmpeg-static'
 import ffprobeStatic from 'ffprobe-static'
 import { BUILTINS, loadBridges, loadPlugins } from '../connectors'
+import { detectSilences, parseSrt, speechSegments } from '../core/edit'
 import { Engine } from '../core/engine'
 import { coverFrame, fit, kindOf, probe, type FitMode } from '../core/media'
 import { Registry } from '../core/registry'
 import { plainCipher, Store, type Cipher } from '../core/store'
+import { Studio } from '../core/studio'
 import type { ToolEnv } from '../core/tools'
-import type { ApprovalRequest, PostDraft } from '../shared/types'
+import type { ApprovalRequest, CompositionSpec, EditSpec, PostDraft } from '../shared/types'
 import { Agent, type AgentEvent } from './agent'
 import { BrowserManager } from './browser'
+import { renderComposition } from './composer'
 import { makeContextFactory, settingString, type Paths } from './context'
 import { PolycastMcpServer } from './mcp-server'
+import { listVoices, speak } from './tts'
 
 protocol.registerSchemesAsPrivileged([
   { scheme: 'polycast-media', privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, bypassCSP: true } }
@@ -81,6 +85,28 @@ async function main() {
   const engine = new Engine(store, registry, makeContext, mediaTools)
   engine.recover()
 
+  // ---- local media for previews and compositions ----
+  const mediaHandler = (req: Request) => {
+    const p = decodeURIComponent(new URL(req.url).pathname.replace(/^\//, ''))
+    if (!kindOf(p) && !/\.(wav|mp3|m4a|aac|ogg|flac)$/i.test(p)) return new Response('not media', { status: 403 })
+    return net.fetch(pathToFileURL(p).toString(), { headers: req.headers })
+  }
+
+  // ---- studio: video edits and Claude-generated videos ----
+  const studio = new Studio(
+    store,
+    mediaTools,
+    paths.media,
+    {
+      renderComposition: (c, out, work, narration, onProgress, signal) =>
+        renderComposition(c, out, work, narration, { tools: mediaTools, mediaHandler }, onProgress, signal),
+      speak,
+      voices: listVoices
+    },
+    (id, fraction, note) => send('progress', { scope: `project:${id}`, fraction, note })
+  )
+  engine.isAiMedia = studio.isAiMedia
+
   // ---- approvals (the person confirms anything an AI wants to publish or send) ----
   const approvals = new Map<string, (ok: boolean) => void>()
   const requestApproval = (req: Omit<ApprovalRequest, 'id'>) =>
@@ -101,6 +127,7 @@ async function main() {
     })
   const toolEnv = (source: 'agent' | 'mcp'): ToolEnv => ({
     engine,
+    studio,
     mediaDir: paths.media,
     requestApproval,
     autoApprove: () => store.getSetting('ai.autoApprove') === true,
@@ -144,11 +171,7 @@ async function main() {
   await syncMcp()
 
   // ---- media protocol for previews ----
-  protocol.handle('polycast-media', (req) => {
-    const p = decodeURIComponent(new URL(req.url).pathname.replace(/^\//, ''))
-    if (!kindOf(p)) return new Response('not media', { status: 403 })
-    return net.fetch(pathToFileURL(p).toString(), { headers: req.headers })
-  })
+  protocol.handle('polycast-media', mediaHandler)
 
   // ---- change notifications to the UI + desktop notifications ----
   const pending = new Set<string>()
@@ -234,7 +257,39 @@ async function main() {
     },
     'media.probe': (path: string) => probe(mediaTools, path),
     'media.fit': (path: string, aspect: string, mode: FitMode, maxSec?: number) =>
-      fit(mediaTools, path, { aspect, mode, maxSec, outDir: join(paths.media, 'renditions') }, (f) => send('progress', { scope: 'media', fraction: f, note: 'Converting' })),
+      fit(
+        mediaTools,
+        path,
+        { aspect, mode, maxSec, outDir: studio.isAiMedia(path) ? join(studio.generatedDir, 'renditions') : join(paths.media, 'renditions') },
+        (f) => send('progress', { scope: 'media', fraction: f, note: 'Converting' })
+      ),
+    'media.isAi': (path: string) => studio.isAiMedia(path),
+    'media.analyze': async (path: string) => {
+      const info = await probe(mediaTools, path)
+      const silences = info.hasAudio ? await detectSilences(mediaTools, path) : []
+      return { info, silences, speechSegments: info.hasAudio ? speechSegments(info.durationSec ?? 0, silences) : [] }
+    },
+    'media.readSrt': (path: string) => parseSrt(readFileSync(path, 'utf8')),
+    'media.pickFiles': async (kind: 'video' | 'image' | 'audio' | 'srt' | 'any', multi?: boolean) => {
+      const ext = { video: ['mp4', 'mov', 'm4v', 'webm', 'mkv'], image: ['jpg', 'jpeg', 'png', 'webp'], audio: ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac'], srt: ['srt'], any: ['mp4', 'mov', 'm4v', 'webm', 'mkv', 'jpg', 'jpeg', 'png', 'webp'] }[kind]
+      const r = await dialog.showOpenDialog(win!, { properties: multi ? ['openFile', 'multiSelections'] : ['openFile'], filters: [{ name: kind, extensions: ext }] })
+      return r.canceled ? [] : r.filePaths
+    },
+    'studio.list': () => studio.list(),
+    'studio.get': (id: string) => studio.get(id),
+    'studio.saveEdit': (p: { id?: string; name?: string; spec: EditSpec }) => studio.saveEdit(p),
+    'studio.saveGenerated': (p: { id?: string; name?: string; prompt?: string; composition: CompositionSpec }) => studio.saveGenerated(p),
+    'studio.render': async (id: string) => {
+      try {
+        return await studio.render(id)
+      } catch (e) {
+        send('progress', { scope: `project:${id}`, fraction: 0, note: 'Failed' })
+        throw e
+      }
+    },
+    'studio.cancel': (id: string) => studio.cancel(id),
+    'studio.remove': (id: string) => studio.remove(id),
+    'studio.voices': () => studio.voices(),
     'media.cover': (path: string, atSec: number) => coverFrame(mediaTools, path, atSec, join(paths.media, 'covers')),
     'settings.get': () => store.allSettings(),
     'settings.set': async (entries: { key: string; value: unknown; secret?: boolean }[]) => {

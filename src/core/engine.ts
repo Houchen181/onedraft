@@ -10,7 +10,7 @@
 //  - typed errors decide retries (Postiz/Mixpost), backoff carries the next attempt time
 //  - prefer native scheduling: upload early, let the platform publish (social-auto-upload)
 
-import type { Account, Issue, MediaInfo, Post, PostDraft, Target } from '../shared/types'
+import type { Account, Issue, MediaInfo, Post, PostDraft, Target, Variant } from '../shared/types'
 import {
   ContentError,
   NeedsLoginError,
@@ -118,8 +118,32 @@ export class Engine {
 
   // ---------- posts ----------
 
+  /** Set by the app: true for files rendered from AI compositions (they must carry the AI label). */
+  isAiMedia?: (path: string) => boolean
+
   savePost(d: PostDraft): Post {
-    return this.store.savePost(d, (accountId) => this.store.getAccount(accountId)?.platform)
+    const media = [...d.media, ...d.targets.flatMap((t) => t.variant.media ?? [])]
+    const aiGenerated = d.aiGenerated || (!!this.isAiMedia && media.some((m) => this.isAiMedia!(m)))
+    return this.store.savePost({ ...d, aiGenerated }, (accountId) => this.store.getAccount(accountId)?.platform)
+  }
+
+  /** Change one target's variant, keeping the post's AI label right if AI media was added. */
+  updateVariant(targetId: string, patch: Variant): Target {
+    const t = this.store.updateTargetVariant(targetId, patch)
+    const post = this.mustPost(t.postId)
+    if (!post.aiGenerated && this.isAiMedia && (t.variant.media ?? []).some((m) => this.isAiMedia!(m))) {
+      this.savePost({
+        id: post.id,
+        title: post.title,
+        body: post.body,
+        tags: post.tags,
+        media: post.media,
+        aiGenerated: true,
+        scheduledAt: post.scheduledAt,
+        targets: post.targets.map((x) => ({ accountId: x.accountId, variant: x.variant }))
+      })
+    }
+    return this.store.getTarget(targetId)!
   }
 
   mustPost(id: string): Post {

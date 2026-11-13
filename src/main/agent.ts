@@ -1,10 +1,11 @@
 // The in-app AI agent: Claude with Polycast's tools, a streaming tool loop, conversation kept in SQLite.
 // Anything that publishes or replies goes through an approval card in the app (see core/tools.ts).
 
+import { readFileSync } from 'node:fs'
 import Anthropic from '@anthropic-ai/sdk'
 import { z } from 'zod'
 import type { Store } from '../core/store'
-import { runTool, TOOLS, type ToolEnv } from '../core/tools'
+import { runTool, splitImages, TOOLS, type ToolEnv } from '../core/tools'
 import type { AgentItem } from '../shared/types'
 
 type Msg = Anthropic.Beta.BetaMessageParam
@@ -25,7 +26,12 @@ How to help with a post:
 4. create_post (it is only a draft), read the issues it returns, fix errors with update_variant, then summarize what each account will get.
 5. Publishing: call approve_post only when the user asked to publish or schedule. The user confirms in the app; if they decline, ask what to change. Never claim something is published until get_post shows it.
 
-Mark aiGenerated true when the user's media or text was generated or substantially altered by AI; ask if you are unsure. Platforms (and China's labeling rules for Bilibili and Rednote) require that disclosure.
+Videos:
+- Editing the person's own footage: analyze_video, then view_frames to actually look at it; plan the cut (speechSegments removes dead air; pick the strongest moments for short vertical versions), then edit_video. Keep their voice and intent; captions should match what is said. Check the result with view_frames before offering it for a post.
+- Making a video from scratch: write it with generate_video (HTML + CSS animations; narration optional). Design for a phone: big type, high contrast, one idea per scene, motion that reads without sound. Always view_frames the render and fix anything clipped or off-screen.
+- One edit per platform when needed (a 16:9 cut for YouTube/Bilibili, a short 9:16 cut for TikTok/Reels/Shorts/Rednote).
+
+Mark aiGenerated true when the user's media or text was generated or substantially altered by AI; ask if you are unsure. Media from generate_video is labelled automatically. Platforms (and China's labeling rules for Bilibili and Rednote) require that disclosure.
 For comments, draft replies in the user's voice and send them with reply_comment, which the user confirms.
 Be brief in chat. File paths are absolute Windows paths.`
 
@@ -61,7 +67,12 @@ export function itemsFrom(messages: Msg[]): AgentItem[] {
       } else if (b.type === 'tool_result') {
         const t = tools.get(b.tool_use_id)
         if (t) {
-          t.result = typeof b.content === 'string' ? b.content : JSON.stringify(b.content)
+          if (typeof b.content === 'string' || !b.content) t.result = b.content ?? ''
+          else {
+            const parts = b.content as { type: string; text?: string }[]
+            const n = parts.filter((p) => p.type === 'image').length
+            t.result = parts.filter((p) => p.type === 'text').map((p) => p.text).join('\n') + (n ? `\n[${n} image${n > 1 ? 's' : ''}]` : '')
+          }
           t.isError = b.is_error
         }
       }
@@ -183,9 +194,20 @@ export class Agent {
       const results = await Promise.all(
         uses.map(async (u) => {
           const r = await runTool(u.name, u.input, env)
-          let content = JSON.stringify(r.result ?? null, null, 1)
-          if (content.length > 30_000) content = `${content.slice(0, 30_000)}… (truncated)`
-          return { type: 'tool_result' as const, tool_use_id: u.id, content, is_error: !r.ok }
+          const { data, images } = splitImages(r.result)
+          let text = JSON.stringify(data ?? null, null, 1)
+          if (text.length > 30_000) text = `${text.slice(0, 30_000)}… (truncated)`
+          if (!images.length) return { type: 'tool_result' as const, tool_use_id: u.id, content: text, is_error: !r.ok }
+          // Frames come back as real images so Claude can see the video.
+          const blocks: Anthropic.Beta.BetaToolResultBlockParam['content'] = [{ type: 'text', text }]
+          for (const img of images) {
+            if (img.label) blocks.push({ type: 'text', text: img.label })
+            blocks.push({
+              type: 'image',
+              source: { type: 'base64', media_type: img.path.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg', data: readFileSync(img.path).toString('base64') }
+            })
+          }
+          return { type: 'tool_result' as const, tool_use_id: u.id, content: blocks, is_error: !r.ok }
         })
       )
       if (signal.aborted) {

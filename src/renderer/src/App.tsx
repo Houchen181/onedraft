@@ -7,10 +7,12 @@ import { Activity } from './pages/Activity'
 import { Compose } from './pages/Compose'
 import { Posts } from './pages/Posts'
 import { Settings } from './pages/Settings'
+import { Studio } from './pages/Studio'
 import { Ctx, Modal, type AppCtx, type Page } from './ui'
 
 const NAV: [Page, string, string][] = [
   ['compose', '✎', 'Compose'],
+  ['studio', '▶', 'Studio'],
   ['posts', '☰', 'Posts'],
   ['accounts', '◎', 'Accounts'],
   ['activity', '↻', 'Activity'],
@@ -21,6 +23,8 @@ export function App() {
   const [page, setPage] = useState<Page>('compose')
   const [composeId, setComposeId] = useState<string>()
   const [composeKey, setComposeKey] = useState(0)
+  const [composeSeed, setComposeSeed] = useState<string[]>()
+  const [studioSeed, setStudioSeed] = useState<string>()
   const [platforms, setPlatforms] = useState<PlatformManifest[]>([])
   const [toasts, setToasts] = useState<{ id: number; text: string; error?: boolean }[]>([])
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([])
@@ -50,9 +54,20 @@ export function App() {
       go: (p, postId) => {
         if (p === 'compose') {
           setComposeId(postId)
+          setComposeSeed(undefined)
           setComposeKey((k) => k + 1)
         }
         setPage(p)
+      },
+      newPost: (media) => {
+        setComposeId(undefined)
+        setComposeSeed(media)
+        setComposeKey((k) => k + 1)
+        setPage('compose')
+      },
+      openStudio: (path) => {
+        setStudioSeed(path)
+        setPage('studio')
       },
       ask: (text) => {
         setCollapsed(false)
@@ -92,7 +107,8 @@ export function App() {
           </div>
         </nav>
         <main className="main">
-          {page === 'compose' && <Compose key={composeKey} postId={composeId} onSaved={setComposeId} />}
+          {page === 'compose' && <Compose key={composeKey} postId={composeId} seedMedia={composeSeed} onSaved={setComposeId} />}
+          {page === 'studio' && <Studio seed={studioSeed} onSeedTaken={() => setStudioSeed(undefined)} />}
           {page === 'posts' && <Posts />}
           {page === 'accounts' && <Accounts />}
           {page === 'activity' && <Activity />}

@@ -48,6 +48,7 @@ export async function probe(tools: MediaTools, path: string): Promise<MediaInfo>
     format?: { duration?: string }
   }
   const v = j.streams?.find((s) => s.codec_type === 'video')
+  const hasAudio = !!j.streams?.some((s) => s.codec_type === 'audio')
   let width = v?.width
   let height = v?.height
   const rot = Math.abs(Number(v?.tags?.rotate ?? v?.side_data_list?.find((d) => d.rotation !== undefined)?.rotation ?? 0))
@@ -60,7 +61,8 @@ export async function probe(tools: MediaTools, path: string): Promise<MediaInfo>
     height,
     durationSec: kind === 'video' && Number.isFinite(duration) ? duration : undefined,
     sizeBytes,
-    codec: v?.codec_name
+    codec: v?.codec_name,
+    hasAudio
   }
 }
 

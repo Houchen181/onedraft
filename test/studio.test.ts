@@ -18,7 +18,7 @@ let dir: string
 let clip: string
 
 beforeAll(() => {
-  dir = mkdtempSync(join(tmpdir(), 'polycast-studio-'))
+  dir = mkdtempSync(join(tmpdir(), 'onedraft-studio-'))
   clip = join(dir, 'clip.mp4')
   const r = spawnSync(tools.ffmpeg, ['-y', '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=30', '-f', 'lavfi', '-i', 'sine=frequency=500', '-t', '3', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', clip])
   if (r.status !== 0) throw new Error(r.stderr.toString())

@@ -113,7 +113,8 @@ export interface FieldSpec {
 
 /** What a platform accepts. Used to validate variants before anything is sent. */
 export interface Constraints {
-  title?: { required?: boolean; max: number }
+  /** unit 'halfAscii': English letters, digits and spaces count half (Rednote). */
+  title?: { required?: boolean; max: number; unit?: 'chars' | 'halfAscii' }
   /** overflow 'thread': text over the limit is split into a thread unless options.thread === false. */
   caption?: { max: number; required?: boolean; unit?: 'chars' | 'bytes' | 'weighted'; overflow?: 'thread' }
   tags?: { required?: boolean; max?: number; maxEach?: number; maxTotalChars?: number; style: 'field' | 'hashtags' }

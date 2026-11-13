@@ -26,7 +26,7 @@ $s.Dispose()
 `
 
 function ps(script: string, args: string[] = []): Promise<string> {
-  const dir = join(tmpdir(), `polycast-ps-${randomUUID().slice(0, 8)}`)
+  const dir = join(tmpdir(), `onedraft-ps-${randomUUID().slice(0, 8)}`)
   mkdirSync(dir, { recursive: true })
   const file = join(dir, 's.ps1')
   writeFileSync(file, `﻿${script}`, 'utf8')

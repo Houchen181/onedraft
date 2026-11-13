@@ -83,6 +83,10 @@ function aspectOk(ratio: number, allowed: string[]): boolean {
   })
 }
 
+/** Length as a platform counts it. */
+export const measure = (s: string, unit: 'chars' | 'bytes' | 'weighted' | 'halfAscii' = 'chars'): number =>
+  unit === 'halfAscii' ? Math.ceil([...s].reduce((n, ch) => n + ((ch.codePointAt(0) ?? 0) < 128 ? 0.5 : 1), 0)) : len(s, unit as 'chars')
+
 const len = (s: string, unit: 'chars' | 'bytes' | 'weighted' = 'chars') =>
   unit === 'bytes' ? Buffer.byteLength(s, 'utf8') : unit === 'weighted' ? weightedLength(s) : [...s].length
 
@@ -95,7 +99,9 @@ export function validateContent(manifest: PlatformManifest, c: ResolvedContent, 
 
   if (k.title) {
     if (k.title.required && !c.title.trim()) err('title', `${manifest.name} needs a title.`)
-    if (len(c.title) > k.title.max) err('title', `Title is ${len(c.title)} characters; ${manifest.name} allows ${k.title.max}.`)
+    const tl = measure(c.title, k.title.unit)
+    if (tl > k.title.max)
+      err('title', `Title is ${tl} characters${k.title.unit === 'halfAscii' ? ' (English letters count half)' : ''}; ${manifest.name} allows ${k.title.max}.`)
   }
 
   const caption = k.tags?.style === 'hashtags' ? captionWithHashtags(c.caption, c.tags) : c.caption

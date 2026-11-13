@@ -1,4 +1,4 @@
-// MCP bridge: turns any MCP server that can post somewhere into a Polycast platform.
+// MCP bridge: turns any MCP server that can post somewhere into a OneDraft platform.
 // Configure in Settings → "MCP bridges" (JSON). Example for xiaohongshu-mcp:
 //
 // [{ "id": "xhs-mcp", "name": "Rednote (xiaohongshu-mcp)", "url": "http://localhost:18060/mcp",
@@ -80,7 +80,7 @@ export function fillTemplate(t: unknown, v: Record<string, unknown>): unknown {
 }
 
 async function withClient<T>(cfg: BridgeConfig, fn: (c: Client) => Promise<T>): Promise<T> {
-  const client = new Client({ name: 'polycast', version: '0.1.0' })
+  const client = new Client({ name: 'onedraft', version: '0.1.0' })
   const transport = cfg.url
     ? new StreamableHTTPClientTransport(new URL(cfg.url), { requestInit: { headers: cfg.headers ?? {} } })
     : cfg.command

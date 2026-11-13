@@ -1,6 +1,6 @@
 // Optional "public media host": some APIs (Instagram images, TikTok photos) fetch media from a public
 // URL instead of accepting an upload. A desktop app has no public server, so the user can point
-// Polycast at any S3-compatible bucket (Cloudflare R2, AWS S3, Backblaze B2, MinIO) with a public URL.
+// OneDraft at any S3-compatible bucket (Cloudflare R2, AWS S3, Backblaze B2, MinIO) with a public URL.
 // Files are uploaded just before publishing and deleted afterwards.
 
 import { createHash, createHmac, randomUUID } from 'node:crypto'
@@ -78,7 +78,7 @@ export class MediaHost {
   /** Upload a local file; returns its public URL and key (for deletion). */
   async put(path: string): Promise<{ url: string; key: string }> {
     const ext = extname(path).slice(1).toLowerCase()
-    const key = `polycast/${randomUUID()}-${basename(path).replace(/[^\w.-]+/g, '_')}`
+    const key = `onedraft/${randomUUID()}-${basename(path).replace(/[^\w.-]+/g, '_')}`
     const res = await this.f(presign(this.cfg, 'PUT', key), {
       method: 'PUT',
       body: readFileSync(path),

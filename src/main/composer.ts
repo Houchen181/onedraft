@@ -1,5 +1,5 @@
 // Claude-generated video: the assistant writes an HTML page whose CSS/Web animations (or a
-// window.polycastSeek(t) hook for canvas/JS drawing) describe the video. Polycast loads it in an
+// window.onedraftSeek(t) hook for canvas/JS drawing) describe the video. OneDraft loads it in an
 // offscreen, sandboxed, network-blocked window, seeks to every frame time, captures the pixels and
 // pipes them into ffmpeg. Deterministic: the same HTML always gives the same video.
 
@@ -10,15 +10,15 @@ import { BrowserWindow, session } from 'electron'
 import { frameFor, probe, type MediaTools } from '../core/media'
 import type { CompositionSpec, MediaInfo } from '../shared/types'
 
-const PARTITION = 'polycast-render'
+const PARTITION = 'onedraft-render'
 let sessionReady = false
 
 function renderSession(mediaHandler: (req: Request) => Response | Promise<Response>) {
   const ses = session.fromPartition(PARTITION)
   if (!sessionReady) {
-    // No network: compositions are self-contained (inline assets, file:// or polycast-media:// paths).
+    // No network: compositions are self-contained (inline assets, file:// or onedraft-media:// paths).
     ses.webRequest.onBeforeRequest((d, cb) => cb({ cancel: /^(https?|wss?|ftp):/i.test(d.url) }))
-    ses.protocol.handle('polycast-media', mediaHandler)
+    ses.protocol.handle('onedraft-media', mediaHandler)
     ses.setPermissionRequestHandler((_wc, _perm, cb) => cb(false))
     sessionReady = true
   }
@@ -36,7 +36,7 @@ window.__pcSeek = async (t) => {
     const done = () => { v.removeEventListener('seeked', done); r() }
     v.addEventListener('seeked', done); setTimeout(done, 1500); v.currentTime = target
   })))
-  if (typeof window.polycastSeek === 'function') await window.polycastSeek(t)
+  if (typeof window.onedraftSeek === 'function') await window.onedraftSeek(t)
   await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
   return true
 }
@@ -46,7 +46,7 @@ window.__pcReady = async () => {
   await Promise.all(imgs.map((i) => new Promise((r) => { i.onload = i.onerror = r; setTimeout(r, 5000) })))
   const vids = [...document.querySelectorAll('video')].filter((v) => v.readyState < 2)
   await Promise.all(vids.map((v) => new Promise((r) => { v.onloadeddata = v.onerror = r; setTimeout(r, 5000) })))
-  if (typeof window.polycastReady === 'function') await window.polycastReady()
+  if (typeof window.onedraftReady === 'function') await window.onedraftReady()
   return true
 }
 true
@@ -60,7 +60,7 @@ export function compositionSize(c: CompositionSpec) {
 /** Put the size/duration where the page can read it, and a reset so the page fills the frame. */
 export function wrapHtml(c: CompositionSpec): string {
   const { width, height } = compositionSize(c)
-  const head = `<script>window.POLYCAST=${JSON.stringify({ width, height, duration: c.durationSec, fps: c.fps ?? 30 })}</script>` +
+  const head = `<script>window.ONEDRAFT=${JSON.stringify({ width, height, duration: c.durationSec, fps: c.fps ?? 30 })}</script>` +
     `<style>html,body{margin:0;padding:0;width:${width}px;height:${height}px;overflow:hidden}</style>`
   if (/<head[^>]*>/i.test(c.html)) return c.html.replace(/<head[^>]*>/i, (m) => `${m}${head}`)
   if (/<!doctype[^>]*>/i.test(c.html)) return c.html.replace(/<!doctype[^>]*>/i, (m) => `${m}<head>${head}</head>`)

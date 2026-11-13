@@ -1,8 +1,8 @@
 // The assistant on the person's own Claude plan, through the Claude Code on this computer.
 //
-// Polycast starts the unmodified `claude` program (signed in by the person, with their Pro/Max plan) in
-// print mode, with its built-in tools switched off and only Polycast's tools available through a private
-// MCP server. Polycast never reads, stores or passes on Claude credentials, and removes any API key from
+// OneDraft starts the unmodified `claude` program (signed in by the person, with their Pro/Max plan) in
+// print mode, with its built-in tools switched off and only OneDraft's tools available through a private
+// MCP server. OneDraft never reads, stores or passes on Claude credentials, and removes any API key from
 // the child's environment so the person's own sign-in is used.
 //
 // Anthropic does not allow third-party apps to offer Claude plan sign-in to their users, so this is for
@@ -19,7 +19,7 @@ import type { AgentEvent } from './agent'
 import { SYSTEM } from './agent'
 
 const CONVERSATION = 'claude-code'
-const PREFIX = 'mcp__polycast__'
+const PREFIX = 'mcp__onedraft__'
 
 export function findClaude(configured?: string): string | undefined {
   const exe = process.platform === 'win32' ? 'claude.exe' : 'claude'
@@ -83,7 +83,7 @@ export class ClaudeCodeAgent {
       emit: (e: AgentEvent) => void
       cli: () => string | undefined
       model: () => string | undefined
-      /** The private MCP server Claude Code uses to reach Polycast's tools. */
+      /** The private MCP server Claude Code uses to reach OneDraft's tools. */
       mcp: () => Promise<{ url: string; token: string }>
       workDir: string
     }
@@ -148,7 +148,7 @@ export class ClaudeCodeAgent {
     mkdirSync(this.deps.workDir, { recursive: true })
     const mcp = await this.deps.mcp()
     const config = JSON.stringify({
-      mcpServers: { polycast: { type: 'http', url: mcp.url, headers: { Authorization: `Bearer ${mcp.token}` } } }
+      mcpServers: { onedraft: { type: 'http', url: mcp.url, headers: { Authorization: `Bearer ${mcp.token}` } } }
     })
     const existing = this.deps.store.getSetting<string>('ai.ccSession')
     const session = existing ?? randomUUID()
@@ -158,7 +158,7 @@ export class ClaudeCodeAgent {
       '--system-prompt', SYSTEM,
       '--tools', '',
       '--mcp-config', config, '--strict-mcp-config',
-      '--allowedTools', 'mcp__polycast',
+      '--allowedTools', 'mcp__onedraft',
       '--permission-mode', 'dontAsk',
       '--setting-sources', 'local',
       '--disable-slash-commands',
@@ -184,8 +184,8 @@ export class ClaudeCodeAgent {
       if (ev.type === 'system' && ev.subtype === 'init') {
         sawSession = true
         if (!existing) this.deps.store.setSetting('ai.ccSession', ev.session_id ?? session)
-        const pc = ev.mcp_servers?.find((s) => s.name === 'polycast')
-        if (pc && pc.status !== 'connected') this.deps.emit({ type: 'error', message: `Claude Code could not reach Polycast's tools (${pc.status}).` })
+        const pc = ev.mcp_servers?.find((s) => s.name === 'onedraft')
+        if (pc && pc.status !== 'connected') this.deps.emit({ type: 'error', message: `Claude Code could not reach OneDraft's tools (${pc.status}).` })
         return
       }
       if (ev.parent_tool_use_id) return // subagent chatter

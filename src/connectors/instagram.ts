@@ -158,7 +158,7 @@ export const instagram: Connector = {
     notes: [
       'Needs an Instagram Business or Creator account.',
       'Images (and videos, if direct upload is refused) need a public media host: set one up in Settings.',
-      'Instagram has no scheduling API: scheduled posts need Polycast running at the publish time.',
+      'Instagram has no scheduling API: scheduled posts need OneDraft running at the publish time.',
       'About 100 API posts per 24 hours.'
     ]
   },

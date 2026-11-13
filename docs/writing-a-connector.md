@@ -38,7 +38,7 @@ If an MCP server can already post to the platform, describe it in **Settings →
 
 ## 2. Plugin (one JavaScript file)
 
-Create `%APPDATA%\polycast\connectors\<name>\index.js` (CommonJS) exporting `connector`, then
+Create `%APPDATA%\onedraft\connectors\<name>\index.js` (CommonJS) exporting `connector`, then
 **Settings → Connectors → Reload connectors**. Ask Claude Code to write one: point it at this file,
 `src/core/connector.ts` and the platform's API docs.
 
@@ -57,7 +57,7 @@ exports.connector = {
     notes: ['Anything the user should know.']
   },
   async connect(ctx, input) {
-    ctx.secrets.set({ token: input.token })            // encrypted by Polycast
+    ctx.secrets.set({ token: input.token })            // encrypted by OneDraft
     const me = await (await ctx.fetch('https://api.example/me', { headers: { authorization: `Bearer ${input.token}` } })).json()
     return { name: me.name, handle: '@' + me.handle, remoteUserId: String(me.id) }
   },
@@ -81,7 +81,7 @@ exports.connector = {
 - **Throw the right error.** Import nothing — match by `name` if you're writing plain JS:
   `NeedsLoginError` (reconnect), `RetryableError` (rate limit / 5xx, *only before the platform accepted
   anything*), `ContentError` (shown to the user, no retry), `VerificationRequiredError` (captcha/SMS — never
-  automate), `UnconfirmedError` (it may be live; Polycast will never re-send it automatically).
+  automate), `UnconfirmedError` (it may be live; OneDraft will never re-send it automatically).
   Built-in connectors import these from `src/core/connector.ts`.
 - **Never post twice.** Once a platform has accepted an upload, any later failure is `UnconfirmedError`.
 - **Respect the AI label.** If `content.aiGenerated`, set the platform's disclosure flag.

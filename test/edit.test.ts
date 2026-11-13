@@ -21,7 +21,7 @@ const ff = (args: string[]) => {
 }
 
 beforeAll(() => {
-  dir = mkdtempSync(join(tmpdir(), 'polycast-edit-'))
+  dir = mkdtempSync(join(tmpdir(), 'onedraft-edit-'))
   talk = join(dir, 'talk.mp4')
   ff(['-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=30', '-f', 'lavfi', '-i', "aevalsrc='if(between(t,2,5),0,0.4*sin(2*PI*440*t))':s=48000",
     '-t', '8', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', talk])
@@ -96,7 +96,7 @@ describe('render', () => {
         aspect: '9:16',
         fit: 'blur',
         transitionSec: 0.3,
-        texts: [{ text: 'Polycast 测试 title', start: 0, end: 2, position: 'top', box: true }],
+        texts: [{ text: 'OneDraft 测试 title', start: 0, end: 2, position: 'top', box: true }],
         captions: [{ start: 2, end: 3.5, text: 'A caption that is long enough to need wrapping on a phone screen' }],
         music: { src: scene.replace('scene', 'talk'), volume: 0.2 },
         logo: { src: photo, position: 'bottom-right', widthFraction: 0.12 },
@@ -107,7 +107,7 @@ describe('render', () => {
       out,
       join(dir, 'work')
     )
-    if (process.env.POLYCAST_KEEP) (await import('node:fs')).copyFileSync(out, join(process.env.POLYCAST_KEEP, 'edit-test.mp4'))
+    if (process.env.ONEDRAFT_KEEP) (await import('node:fs')).copyFileSync(out, join(process.env.ONEDRAFT_KEEP, 'edit-test.mp4'))
     // 2.15 + 3.15 + 1.5 + 2 - 3*0.3 = 7.9
     expect(r).toMatchObject({ width: 1080, height: 1920, hasAudio: true })
     expect(r.durationSec!).toBeGreaterThan(7.6)

@@ -165,7 +165,16 @@ export class Store {
     return r ? this.toAccount(r as Row) : undefined
   }
 
-  /** Insert or update by (platform, remoteUserId) so reconnecting doesn't duplicate. */
+  /** The account connected for a platform (OneDraft keeps one account per platform). */
+  accountFor(platform: string): Account | undefined {
+    const r = this.db.prepare('select * from accounts where platform = ? order by created_at limit 1').get(platform)
+    return r ? this.toAccount(r as Row) : undefined
+  }
+
+  /**
+   * One account per platform: connecting again updates that platform's account in place (same id), so drafts and
+   * scheduled posts keep pointing at it even when a different login replaces the old one.
+   */
   upsertAccount(a: {
     platform: string
     remoteUserId: string
@@ -174,16 +183,14 @@ export class Store {
     avatarUrl?: string
     meta?: Record<string, unknown>
   }): Account {
-    const existing = this.db
-      .prepare('select id from accounts where platform = ? and remote_user_id = ?')
-      .get(a.platform, a.remoteUserId) as Row | undefined
+    const existing = this.db.prepare('select id from accounts where platform = ? order by created_at limit 1').get(a.platform) as Row | undefined
     const id = (existing?.id as string) ?? randomUUID()
     if (existing) {
       this.db
         .prepare(
-          `update accounts set name = ?, handle = ?, avatar_url = ?, meta = ?, status = 'connected', status_note = null where id = ?`
+          `update accounts set remote_user_id = ?, name = ?, handle = ?, avatar_url = ?, meta = ?, status = 'connected', status_note = null where id = ?`
         )
-        .run(a.name, a.handle ?? null, a.avatarUrl ?? null, json(a.meta ?? {}), id)
+        .run(a.remoteUserId, a.name, a.handle ?? null, a.avatarUrl ?? null, json(a.meta ?? {}), id)
     } else {
       this.db
         .prepare(

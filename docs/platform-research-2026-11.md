@@ -48,9 +48,9 @@ these change often. Sources are the official docs and the projects' own source f
 - `biliup` (MIT) — `github.com/biliup/biliup` (biliup-rs is archived). Windows asset `biliupR-v<ver>-x86_64-windows.zip`.
 - Login is interactive only (needs a real console): `biliup -u <cookies.json> login` (QR / SMS / cookie). One cookie file per account.
 - Upload: `biliup -u <file> upload <video> --title --desc --tag a,b --tid <n> --cover <img> --dtime <unix> --copyright 1|2 --source <url> --dynamic <text>`.
-  Exit 0 = success (`投稿成功`), BV id parsed from the log. `601 上传过快` = rate limit. `--dtime` ≥ 4 h ahead.
+  Exit 0 = success (the log says the submission succeeded), BV id parsed from the log. Error 601 ("uploading too fast") = rate limit. `--dtime` ≥ 4 h ahead.
 - Title < 80, desc < 250 (open API) / 2000 (web), tags required. Non-member accounts: 5 posts/day.
-- **AI declaration (创作声明) is not exposed by biliup or the API** — must be ticked in the creator centre.
+- **The AI-content declaration is not exposed by biliup or the API** — must be ticked in the creator centre.
 
 ## Rednote / Xiaohongshu — browser automation (connector: `rednote`, kind `browser`)
 - No creator posting API (open platform = merchants; share SDK opens the phone app).
@@ -59,11 +59,11 @@ these change often. Sources are the official docs and the projects' own source f
 - Title ≤ 20 (ASCII counts half), body ≤ 1,000, ≤ 10 topics, native scheduling 1 h–14 days ahead, ~50 posts/day.
 - One web session per account (logging in elsewhere logs us out). New accounts may be asked for real-name verification.
 - **2026-08-06 rules penalise accounts run automatically by AI tools/scripts; undeclared AI content is labelled and throttled.**
-  So the connector defaults to *handoff*: it fills the note and you press Publish. AI declaration: 内容类型声明 → 笔记含AI合成内容.
+  So the connector defaults to *handoff*: it fills the note and you press Publish. AI declaration: the content-type declaration → "contains AI-generated content".
 - Optional: `xiaohongshu-mcp` (Apache-2.0, Go) can be attached through the MCP bridge connector instead.
 
 ## China AI-labelling rules
-CAC 《人工智能生成合成内容标识办法》 in force since 2025-09-01: users must declare AI content with the platform's tool.
+The CAC's Measures for Labeling AI-Generated Synthetic Content, in force since 2025-09-01: users must declare AI content with the platform's tool.
 
 ## Ideas taken from other tools
 | From | Idea |

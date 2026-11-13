@@ -137,7 +137,7 @@ export const tiktok: Connector = {
     notes: [
       'Until TikTok audits your developer app, posts are private ("Only me") and the TikTok account must be private.',
       "By posting you agree to TikTok's Music Usage Confirmation.",
-      'TikTok has no scheduling API: scheduled posts need Polycast running at the publish time.'
+      'TikTok has no scheduling API: scheduled posts need OneDraft running at the publish time.'
     ]
   },
 

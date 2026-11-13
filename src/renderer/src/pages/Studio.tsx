@@ -150,7 +150,7 @@ function GenerateDialog({ onClose, onTemplate }: { onClose: () => void; onTempla
     <Modal onClose={onClose}>
       <h2>Make a video with AI</h2>
       <p className="muted" style={{ marginTop: 0 }}>
-        Claude designs the video as animated scenes and Polycast renders it to MP4, labelled as AI-generated.
+        Claude designs the video as animated scenes and OneDraft renders it to MP4, labelled as AI-generated.
       </p>
       <div className="stack">
         <label className="field">
@@ -159,7 +159,7 @@ function GenerateDialog({ onClose, onTemplate }: { onClose: () => void; onTempla
             autoFocus
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
-            placeholder="e.g. A 20-second explainer: why surface acoustic waves can steer magnons in CrSBr — three beats, bold kinetic type, ends with 'paper link in bio'."
+            placeholder="e.g. A 20-second teaser for our weekend sale: three beats, bold kinetic type, ends with 'link in bio'."
           />
         </label>
         <div className="split">
@@ -290,7 +290,7 @@ function GeneratedEditor({ project, onDeleted }: { project: EditProject; onDelet
         </div>
         <h3>HTML (what Claude wrote — editable)</h3>
         <textarea className="mono" value={c.html} onChange={(e) => set({ html: e.target.value })} style={{ minHeight: 260, fontSize: 12 }} spellCheck={false} />
-        <div className="help">CSS animations are paused and stepped frame by frame; window.polycastSeek(t) can draw canvas frames. No network access while rendering.</div>
+        <div className="help">CSS animations are paused and stepped frame by frame; window.onedraftSeek(t) can draw canvas frames. No network access while rendering.</div>
       </div>
     </div>
   )
@@ -706,7 +706,18 @@ function Output(props: {
     <div className="stack" style={{ marginTop: 12 }}>
       {p.output && (
         <div className="media" style={{ aspectRatio: 'auto', maxHeight: 460, background: '#000' }}>
-          <video key={p.output + p.updatedAt} src={`${mediaUrl(p.output)}#t=1`} controls preload="metadata" style={{ maxHeight: 460 }} />
+          <video
+            key={p.output + p.updatedAt}
+            src={mediaUrl(p.output)}
+            controls
+            preload="auto"
+            style={{ maxHeight: 460 }}
+            // Generated videos usually fade in from black: show a frame from the middle instead.
+            onLoadedMetadata={(e) => {
+              const v = e.currentTarget
+              if (v.currentTime === 0 && Number.isFinite(v.duration)) v.currentTime = Math.min(v.duration * 0.45, 4)
+            }}
+          />
         </div>
       )}
       {props.busy && progress && (

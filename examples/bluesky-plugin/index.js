@@ -1,4 +1,4 @@
-// Example Polycast plugin: Bluesky (AT Protocol). Copy this folder to %APPDATA%\polycast\connectors\bluesky
+// Example OneDraft plugin: Bluesky (AT Protocol). Copy this folder to %APPDATA%\onedraft\connectors\bluesky
 // and press Settings → Connectors → Reload. Uses an app password (bsky.app → Settings → App passwords).
 // Example code: not yet tried against a live account.
 

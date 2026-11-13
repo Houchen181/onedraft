@@ -22,18 +22,18 @@ import { BrowserManager } from './browser'
 import { claudeStatus, ClaudeCodeAgent, findClaude } from './claude-code'
 import { renderComposition } from './composer'
 import { makeContextFactory, settingString, type Paths } from './context'
-import { PolycastMcpServer } from './mcp-server'
+import { OneDraftMcpServer } from './mcp-server'
 import { listVoices, speak } from './tts'
 
 protocol.registerSchemesAsPrivileged([
-  { scheme: 'polycast-media', privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, bypassCSP: true } }
+  { scheme: 'onedraft-media', privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, bypassCSP: true } }
 ])
 
 if (!app.requestSingleInstanceLock()) app.quit()
-app.setAppUserModelId('app.polycast.desktop')
+app.setAppUserModelId('app.onedraft.desktop')
 
 const unpacked = (p: string) => p.replace('app.asar', 'app.asar.unpacked')
-const dataRoot = process.env.POLYCAST_DATA || app.getPath('userData')
+const dataRoot = process.env.ONEDRAFT_DATA || app.getPath('userData')
 const paths: Paths = {
   data: dataRoot,
   profiles: join(dataRoot, 'profiles'),
@@ -58,7 +58,7 @@ async function main() {
   const cipher: Cipher = safeStorage.isEncryptionAvailable()
     ? { encrypt: (s) => safeStorage.encryptString(s), decrypt: (b) => safeStorage.decryptString(Buffer.from(b)) }
     : plainCipher
-  const store = new Store(join(paths.data, 'polycast.db'), cipher)
+  const store = new Store(join(paths.data, 'onedraft.db'), cipher)
   if (cipher === plainCipher) store.log('warn', 'OS encryption is unavailable; secrets are stored unencrypted.')
 
   const registry = new Registry()
@@ -124,7 +124,7 @@ async function main() {
       })
       showWindow()
       send('approval', { id, ...req } satisfies ApprovalRequest)
-      if (Notification.isSupported()) new Notification({ title: 'Polycast needs your OK', body: req.title }).show()
+      if (Notification.isSupported()) new Notification({ title: 'OneDraft needs your OK', body: req.title }).show()
     })
   const toolEnv = (source: 'agent' | 'mcp'): ToolEnv => ({
     engine,
@@ -144,8 +144,8 @@ async function main() {
     model: () => settingString(store, 'ai.model') || 'claude-opus-5-5',
     effort: () => (settingString(store, 'ai.effort') as 'low' | 'medium' | 'high' | 'xhigh' | 'max') || 'medium'
   })
-  // A private MCP server only Polycast's own Claude Code runs know about (random port and token).
-  const assistantMcp = new PolycastMcpServer(() => toolEnv('agent'))
+  // A private MCP server only OneDraft's own Claude Code runs know about (random port and token).
+  const assistantMcp = new OneDraftMcpServer(() => toolEnv('agent'))
   const assistantToken = randomBytes(24).toString('hex')
   const claudeCli = () => findClaude(settingString(store, 'ai.claudePath'))
   const ccAgent = new ClaudeCodeAgent({
@@ -169,7 +169,7 @@ async function main() {
 
   // ---- MCP server ----
   if (!store.getSetting('mcp.token')) store.setSetting('mcp.token', randomBytes(24).toString('hex'), true)
-  const mcp = new PolycastMcpServer(() => toolEnv('mcp'))
+  const mcp = new OneDraftMcpServer(() => toolEnv('mcp'))
   const mcpInfo = () => {
     const port = Number(store.getSetting('mcp.port') ?? 7341)
     const token = settingString(store, 'mcp.token') ?? ''
@@ -179,7 +179,7 @@ async function main() {
       running: mcp.running,
       url,
       token,
-      claudeCode: `claude mcp add --transport http polycast ${url} --header "Authorization: Bearer ${token}"`
+      claudeCode: `claude mcp add --transport http onedraft ${url} --header "Authorization: Bearer ${token}"`
     }
   }
   const syncMcp = async () => {
@@ -194,7 +194,7 @@ async function main() {
   await syncMcp()
 
   // ---- media protocol for previews ----
-  protocol.handle('polycast-media', mediaHandler)
+  protocol.handle('onedraft-media', mediaHandler)
 
   // ---- change notifications to the UI + desktop notifications ----
   const pending = new Set<string>()
@@ -208,7 +208,7 @@ async function main() {
       if (pending.has('events') && Notification.isSupported()) {
         for (const e of store.listEvents(20).filter((x) => x.id > lastEventId).reverse()) {
           if (/^(Published|Scheduled|Ready for you)/.test(e.message) || (e.level === 'error' && e.scope)) {
-            new Notification({ title: e.level === 'error' ? 'Polycast: a post failed' : 'Polycast', body: e.message.slice(0, 200) }).show()
+            new Notification({ title: e.level === 'error' ? 'OneDraft: a post failed' : 'OneDraft', body: e.message.slice(0, 200) }).show()
           }
         }
         lastEventId = store.listEvents(1)[0]?.id ?? lastEventId
@@ -318,10 +318,17 @@ async function main() {
     'settings.set': async (entries: { key: string; value: unknown; secret?: boolean }[]) => {
       for (const e of entries) store.setSetting(e.key, e.value, !!e.secret)
       if (entries.some((e) => e.key.startsWith('mcp.'))) await syncMcp()
-      if (entries.some((e) => e.key === 'mcpBridges')) reloadExtensions()
+      if (entries.some((e) => e.key === 'mcpBridges')) {
+        reloadExtensions()
+        send('changed', 'platforms')
+      }
       return store.allSettings()
     },
-    'connectors.reload': () => reloadExtensions(),
+    'connectors.reload': () => {
+      const r = reloadExtensions()
+      send('changed', 'platforms')
+      return r
+    },
     'agent.send': (text: string) => {
       void agent().send(text)
     },
@@ -398,7 +405,7 @@ function createWindow() {
     minWidth: 960,
     minHeight: 620,
     backgroundColor: '#0e1014',
-    title: 'Polycast',
+    title: 'OneDraft',
     icon,
     autoHideMenuBar: true,
     webPreferences: { preload: join(__dirname, '../preload/index.js'), contextIsolation: true, sandbox: true }
@@ -431,10 +438,10 @@ function createTray() {
   const icon = iconPath()
   if (!icon) return
   tray = new Tray(nativeImage.createFromPath(icon).resize({ width: 16, height: 16 }))
-  tray.setToolTip('Polycast — scheduled posts keep going while this runs')
+  tray.setToolTip('OneDraft — scheduled posts keep going while this runs')
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      { label: 'Open Polycast', click: showWindow },
+      { label: 'Open OneDraft', click: showWindow },
       { type: 'separator' },
       {
         label: 'Quit',
@@ -453,7 +460,7 @@ const pluginReadme = join(paths.plugins, 'README.txt')
 if (!existsSync(pluginReadme)) {
   writeFileSync(
     pluginReadme,
-    'Polycast connector plugins\n\nEach folder here with an index.js (CommonJS) exporting `connector` adds a platform.\nSee docs/writing-a-connector.md in the Polycast source for the interface.\nUse Settings → Connectors → Reload after adding one.\n'
+    'OneDraft connector plugins\n\nEach folder here with an index.js (CommonJS) exporting `connector` adds a platform.\nSee docs/writing-a-connector.md in the OneDraft source for the interface.\nUse Settings → Connectors → Reload after adding one.\n'
   )
 }
 

@@ -1,146 +1,102 @@
-import { useEffect, useState } from 'react'
-import type { Account, Post } from '@shared/types'
-import { call, fileName, on, useData } from '../api'
-import { fmtTime, PlatformDot, Status, useApp } from '../ui'
+import { useState } from 'react'
+import type { Post, Target } from '@shared/types'
+import { fileName, isVideoPath, mediaUrl, useData } from '../api'
+import { fmtTime, PlatformIcon, Status, useApp } from '../ui'
 
-type Progress = Record<string, { fraction: number; note?: string }>
+export const TARGET_DOT: Record<string, string> = {
+  published: 'var(--ok)',
+  scheduled: 'var(--info)',
+  queued: 'var(--custom)',
+  publishing: 'var(--custom)',
+  failed: 'var(--err)',
+  unconfirmed: 'var(--warn)',
+  handoff: 'var(--warn)'
+}
+
+export function Thumb({ path }: { path?: string }) {
+  if (!path) return <div className="thumb">✎</div>
+  return <div className="thumb">{isVideoPath(path) ? <video src={`${mediaUrl(path)}#t=1`} muted preload="metadata" /> : <img src={mediaUrl(path)} alt="" />}</div>
+}
+
+const FILTERS: [string, string, (p: Post) => boolean][] = [
+  ['all', 'All', () => true],
+  ['drafts', 'Drafts', (p) => p.status === 'draft'],
+  ['scheduled', 'Scheduled', (p) => ['queued', 'scheduled'].includes(p.status)],
+  ['published', 'Published', (p) => p.status === 'published'],
+  ['attention', 'Needs attention', (p) => ['failed', 'partial'].includes(p.status) || p.targets.some((t) => ['failed', 'unconfirmed', 'handoff'].includes(t.status))]
+]
+
+export function postTitle(p: Post) {
+  return p.title || p.body.split('\n')[0].slice(0, 80) || (p.media[0] ? fileName(p.media[0]) : 'Untitled post')
+}
 
 export function Posts() {
   const app = useApp()
   const { data: posts } = useData<Post[]>('posts.list', [], ['posts'])
-  const { data: accounts } = useData<Account[]>('accounts.list', [], ['accounts'])
-  const [progress, setProgress] = useState<Progress>({})
-  const [filter, setFilter] = useState<'all' | 'active' | 'done' | 'drafts'>('all')
-
-  useEffect(
-    () =>
-      on('progress', (p) => {
-        const { scope, fraction, note } = p as { scope?: string; fraction: number; note?: string }
-        if (scope) setProgress((s) => ({ ...s, [scope]: { fraction, note } }))
-      }),
-    []
-  )
-
-  const acct = (id: string) => accounts?.find((a) => a.id === id)
-  const act = async (fn: () => Promise<unknown>, ok?: string) => {
-    try {
-      await fn()
-      if (ok) app.toast(ok)
-    } catch (e) {
-      app.toast((e as Error).message, true)
-    }
+  const [filter, setFilter] = useState('all')
+  const test = FILTERS.find((f) => f[0] === filter)![2]
+  const shown = (posts ?? []).filter(test)
+  const when = (p: Post) => {
+    if (p.scheduledAt) return `${p.status === 'published' ? 'Posted' : 'For'} ${fmtTime(p.scheduledAt)}`
+    const done = p.targets.find((t) => t.status === 'published')
+    return done ? `Posted ${fmtTime(done.updatedAt)}` : `Edited ${fmtTime(p.updatedAt)}`
   }
-
-  const shown = (posts ?? []).filter((p) => {
-    if (filter === 'drafts') return p.status === 'draft'
-    if (filter === 'done') return p.status === 'published'
-    if (filter === 'active') return ['queued', 'publishing', 'scheduled', 'partial', 'failed'].includes(p.status)
-    return true
-  })
+  const icon = (t: Target) => (
+    <span key={t.id} title={`${app.platform(t.platform)?.name ?? t.platform}: ${t.status}`} style={{ position: 'relative' }}>
+      <PlatformIcon p={app.platform(t.platform)} size={20} />
+      {TARGET_DOT[t.status] && (
+        <i style={{ position: 'absolute', right: -3, bottom: -3, width: 9, height: 9, borderRadius: '50%', border: '2px solid var(--bg)', background: TARGET_DOT[t.status] }} />
+      )}
+    </span>
+  )
 
   return (
     <div className="page">
-      <h1>Posts</h1>
-      <p className="sub">Everything you have drafted, scheduled and published, account by account.</p>
-      <div className="tabs">
-        {(['all', 'active', 'drafts', 'done'] as const).map((f) => (
-          <button key={f} className={filter === f ? 'active' : ''} onClick={() => setFilter(f)}>
-            {f[0].toUpperCase() + f.slice(1)}
+      <div className="page-head">
+        <div className="grow">
+          <h1>Posts</h1>
+          <p className="sub">Everything you’ve drafted, scheduled and posted.</p>
+        </div>
+        <button className="btn primary" onClick={() => app.newPost()}>
+          + New post
+        </button>
+      </div>
+      <div className="seg" style={{ marginBottom: 14 }}>
+        {FILTERS.map(([id, label]) => (
+          <button key={id} className={filter === id ? 'on' : ''} onClick={() => setFilter(id)}>
+            {label}
           </button>
         ))}
       </div>
       {!shown.length && (
         <div className="empty">
-          Nothing here yet.{' '}
-          <a href="#" onClick={() => app.go('compose')}>
-            Write a post
+          {posts?.length ? 'Nothing here.' : 'No posts yet.'}{' '}
+          <a href="#" onClick={() => app.newPost()}>
+            Write one
+          </a>{' '}
+          or ask Claude in{' '}
+          <a href="#" onClick={() => app.go('chat')}>
+            Chat
           </a>
+          .
         </div>
       )}
-      {shown.map((p) => (
-        <div className="card" key={p.id}>
-          <div className="row">
-            <div className="grow">
-              <div style={{ fontWeight: 600 }}>{p.title || p.body.slice(0, 70) || p.media.map(fileName).join(', ') || 'Untitled'}</div>
-              <div className="small faint">
-                {p.scheduledAt ? `For ${fmtTime(p.scheduledAt)} · ` : ''}edited {fmtTime(p.updatedAt)}
+      <div className="stack" style={{ gap: 2 }}>
+        {shown.map((p) => (
+          <div key={p.id} className="plist-row" onClick={() => app.go('post', p.id)}>
+            <Thumb path={p.media[0]} />
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{postTitle(p)}</div>
+              <div className="small muted">
+                {when(p)}
                 {p.aiGenerated && ' · AI-labelled'}
               </div>
+              <div className="ptargets">{p.targets.map(icon)}</div>
             </div>
             <Status s={p.status} />
-            {p.status === 'draft' || p.targets.some((t) => t.status === 'draft') ? (
-              <button className="btn sm" onClick={() => app.go('compose', p.id)}>
-                Edit
-              </button>
-            ) : null}
-            {p.targets.some((t) => t.status === 'queued') && (
-              <button className="btn sm" onClick={() => act(() => call('posts.cancel', p.id), 'Canceled.')}>
-                Cancel
-              </button>
-            )}
-            <button
-              className="btn ghost sm danger"
-              onClick={() => {
-                if (confirm('Delete this post from Polycast? Anything already published stays on the platforms.')) void act(() => call('posts.remove', p.id))
-              }}
-            >
-              Delete
-            </button>
           </div>
-          {p.targets.map((t) => {
-            const a = acct(t.accountId)
-            const pr = progress[t.postId]
-            return (
-              <div className="target-row" key={t.id}>
-                <PlatformDot color={app.platform(t.platform)?.color} size={12} />
-                <div style={{ minWidth: 0 }}>
-                  <div className="row">
-                    <b>{a?.name ?? 'Removed account'}</b>
-                    <span className="faint small">{app.platform(t.platform)?.name ?? t.platform}</span>
-                    {t.url && (
-                      <a href="#" className="small" onClick={() => call('shell.open', t.url)}>
-                        Open ↗
-                      </a>
-                    )}
-                  </div>
-                  {t.error && <div className={`small ${t.status === 'failed' ? 'issue error' : 'muted'}`} style={{ marginTop: 4 }}>{t.error}</div>}
-                  {t.status === 'publishing' && pr && (
-                    <>
-                      <div className="progress">
-                        <div style={{ width: `${Math.round(pr.fraction * 100)}%` }} />
-                      </div>
-                      <div className="faint small">{pr.note}</div>
-                    </>
-                  )}
-                </div>
-                <div className="row">
-                  <Status s={t.status} />
-                  {t.status === 'failed' && (
-                    <button className="btn sm" onClick={() => act(() => call('targets.retry', t.id), 'Retrying.')}>
-                      Retry
-                    </button>
-                  )}
-                  {(t.status === 'unconfirmed' || t.status === 'handoff') && (
-                    <>
-                      <button className="btn sm" onClick={() => act(() => call('targets.markDone', t.id), 'Marked as published.')}>
-                        It’s live
-                      </button>
-                      <button
-                        className="btn sm"
-                        onClick={() => {
-                          if (confirm('Post it again? Check the platform first, or it may appear twice.')) void act(() => call('targets.retry', t.id, true), 'Retrying.')
-                        }}
-                      >
-                        Post again
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      ))}
+        ))}
+      </div>
     </div>
   )
 }

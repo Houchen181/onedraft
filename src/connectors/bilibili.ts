@@ -47,7 +47,7 @@ async function installBiliup(ctx: ConnectorContext): Promise<string> {
   const rel = await getJson<{ tag_name: string; assets: { name: string; browser_download_url: string }[] }>(
     ctx.fetch,
     'https://api.github.com/repos/biliup/biliup/releases/latest',
-    { headers: { accept: 'application/vnd.github+json', 'user-agent': 'polycast' } },
+    { headers: { accept: 'application/vnd.github+json', 'user-agent': 'onedraft' } },
     'Find biliup release'
   )
   const asset = rel.assets.find((a) => /biliupR-.*x86_64-windows\.zip$/i.test(a.name))
@@ -55,7 +55,7 @@ async function installBiliup(ctx: ConnectorContext): Promise<string> {
   const dir = join(ctx.paths.tools, 'biliup')
   mkdirSync(dir, { recursive: true })
   const zip = join(dir, asset.name)
-  const res = await ctx.fetch(asset.browser_download_url, { headers: { 'user-agent': 'polycast' } })
+  const res = await ctx.fetch(asset.browser_download_url, { headers: { 'user-agent': 'onedraft' } })
   if (!res.ok) throw new Error(`Download failed (${res.status})`)
   writeFileSync(zip, new Uint8Array(await res.arrayBuffer()))
   const x = await ctx.exec('tar', ['-xf', zip, '-C', dir])
@@ -113,7 +113,7 @@ export const bilibili: Connector = {
       media: { required: true, maxVideos: 1 }
     },
     settings: [
-      { key: 'biliupPath', label: 'biliup.exe path', type: 'path', help: 'Leave empty to use the copy Polycast downloads when you connect.' }
+      { key: 'biliupPath', label: 'biliup.exe path', type: 'path', help: 'Leave empty to use the copy OneDraft downloads when you connect.' }
     ],
     connectFields: [
       {
@@ -124,19 +124,19 @@ export const bilibili: Connector = {
       }
     ],
     options: [
-      { key: 'tid', label: 'Category id (tid)', type: 'text', default: '21', required: true, help: 'e.g. 21 日常, 201 科学科普, 231 计算机技术, 95 数码, 138 搞笑.' },
+      { key: 'tid', label: 'Category id (tid)', type: 'text', default: '21', required: true, help: 'e.g. 21 Daily life, 201 Science, 231 Computer tech, 95 Digital, 138 Comedy.' },
       {
         key: 'copyright',
         label: 'Type',
         type: 'select',
         default: '1',
         options: [
-          { value: '1', label: '自制 Original' },
-          { value: '2', label: '转载 Repost' }
+          { value: '1', label: 'Original' },
+          { value: '2', label: 'Repost' }
         ]
       },
       { key: 'source', label: 'Source (for reposts)', type: 'text' },
-      { key: 'dynamic', label: '动态 text (shown in followers’ feed)', type: 'text' },
+      { key: 'dynamic', label: 'Feed update text (shown in followers’ feeds)', type: 'text' },
       {
         key: 'line',
         label: 'Upload line',
@@ -146,9 +146,9 @@ export const bilibili: Connector = {
       }
     ],
     notes: [
-      'Login opens a console window from biliup: choose 扫码登录 (QR) and scan with the Bilibili app.',
-      'Bilibili’s AI declaration (创作声明) is not available to uploaders: tick it in the creator centre after posting AI content.',
-      'Scheduled posts must be 4 hours to 15 days ahead to be held by Bilibili; otherwise Polycast posts at the time.'
+      'Login opens a console window from biliup: choose the QR-code login and scan it with the Bilibili app.',
+      'Bilibili’s AI-content declaration can’t be set by uploaders: turn it on in the creator centre after posting AI content.',
+      'Scheduled posts must be 4 hours to 15 days ahead to be held by Bilibili; otherwise OneDraft posts at the time.'
     ]
   },
 
@@ -158,7 +158,7 @@ export const bilibili: Connector = {
       issues.push({
         level: 'warning' as const,
         field: 'aiGenerated',
-        message: 'After it uploads, tick 创作声明 → AI生成 in Bilibili’s creator centre (required by Chinese rules; biliup cannot set it).'
+        message: 'After it uploads, turn on the AI-content declaration in Bilibili’s creator centre (required for AI content; biliup cannot set it).'
       })
     if (content.options.copyright === '2' && !String(content.options.source ?? '').trim())
       issues.push({ level: 'error' as const, field: 'options.source', message: 'Reposts need a source.' })
@@ -174,7 +174,7 @@ export const bilibili: Connector = {
     const dir = join(ctx.paths.data, 'bilibili')
     mkdirSync(dir, { recursive: true })
     const file = join(dir, `${randomUUID()}.json`)
-    ctx.log('Opening the biliup login window. Choose 扫码登录 and scan the QR code with the Bilibili app.')
+    ctx.log('Opening the biliup login window. Choose the QR-code login and scan it with the Bilibili app.')
     await ctx.exec(exe, ['-u', file, 'login'], { cwd: dir, newConsole: true, timeoutMs: 10 * 60_000 })
     if (!existsSync(file)) throw new Error('Login window closed before signing in.')
     const me = await whoAmI(ctx, file)
@@ -220,7 +220,7 @@ export const bilibili: Connector = {
         remoteId: bvid,
         url: bvid ? `https://www.bilibili.com/video/${bvid}` : undefined,
         state: publishAt ? 'scheduled' : 'published',
-        note: [bvid ? undefined : 'Submitted; Bilibili is reviewing it (no BV id in the log yet).', content.aiGenerated ? 'Remember to tick 创作声明 → AI生成 in the creator centre.' : undefined]
+        note: [bvid ? undefined : 'Submitted; Bilibili is reviewing it (no BV id in the log yet).', content.aiGenerated ? 'Remember to turn on the AI-content declaration in the creator centre.' : undefined]
           .filter(Boolean)
           .join(' ') || undefined
       }

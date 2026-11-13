@@ -247,7 +247,7 @@ export class Engine {
     for (const t of this.store.stuckTargets()) {
       this.store.setTarget(t.id, {
         status: 'unconfirmed',
-        error: 'Polycast closed while this was publishing. Check the platform before retrying.'
+        error: 'OneDraft closed while this was publishing. Check the platform before retrying.'
       })
       this.store.log('warn', 'Interrupted while publishing; marked unconfirmed', t.postId)
     }

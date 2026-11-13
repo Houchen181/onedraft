@@ -1,4 +1,4 @@
-// Polycast as an MCP server (Streamable HTTP on 127.0.0.1, bearer token), so Claude Code, Claude
+// OneDraft as an MCP server (Streamable HTTP on 127.0.0.1, bearer token), so Claude Code, Claude
 // Desktop or any MCP client can draft, validate and schedule posts with the same tools as the in-app
 // agent. Publishing and replies still wait for the person's click in the app.
 
@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs'
 import { runTool, splitImages, TOOLS, type ToolEnv } from '../core/tools'
 
 function buildServer(env: () => ToolEnv): McpServer {
-  const server = new McpServer({ name: 'polycast', version: '0.1.0' })
+  const server = new McpServer({ name: 'onedraft', version: '0.1.0' })
   for (const t of TOOLS) {
     server.registerTool(t.name, { description: t.description, inputSchema: t.schema.shape }, async (input: unknown) => {
       const r = await runTool(t.name, input, env())
@@ -48,7 +48,7 @@ const readBody = (req: IncomingMessage) =>
     req.on('error', reject)
   })
 
-export class PolycastMcpServer {
+export class OneDraftMcpServer {
   private http?: Server
 
   constructor(private env: () => ToolEnv) {}

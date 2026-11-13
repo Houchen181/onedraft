@@ -1,23 +1,139 @@
 // Small shared UI pieces.
 
 import { createContext, useContext, useState, type ReactNode } from 'react'
-import type { FieldSpec, PlatformManifest, TargetStatus } from '@shared/types'
-import { fileName, isVideoPath, mediaUrl } from './api'
+import type { Account, FieldSpec, PlatformManifest, TargetStatus } from '@shared/types'
+import { call, fileName, isVideoPath, mediaUrl } from './api'
 
 export interface AppCtx {
   toast(text: string, error?: boolean): void
   go(page: Page, postId?: string): void
-  ask(text: string): void
-  /** Start a new post with these files. */
-  newPost(media: string[]): void
+  /** Send a request to the assistant. With `background`, stay on the current page. */
+  ask(text: string, opts?: { background?: boolean }): void
+  /** Start a new post, optionally with these files. */
+  newPost(media?: string[]): void
   /** Open Studio with a new edit of this clip. */
   openStudio(path?: string): void
   platforms: PlatformManifest[]
   platform(id: string): PlatformManifest | undefined
+  /** One account per platform. */
+  accounts: Account[]
+  accountFor(platform: string): Account | undefined
+  assistantBusy: boolean
 }
-export type Page = 'compose' | 'studio' | 'posts' | 'accounts' | 'activity' | 'settings'
+export type Page = 'chat' | 'posts' | 'post' | 'calendar' | 'studio' | 'settings'
 export const Ctx = createContext<AppCtx>(null as unknown as AppCtx)
 export const useApp = () => useContext(Ctx)
+
+/** Short mark shown in a platform's colour square. */
+const MARK: Record<string, string> = { youtube: '▶', rednote: 'R', bilibili: 'B', instagram: 'IG', tiktok: 'T', x: 'X' }
+const DARK_TEXT = new Set(['tiktok'])
+
+export function PlatformIcon({ p, size = 30 }: { p?: PlatformManifest; size?: number }) {
+  const id = p?.id ?? '?'
+  return (
+    <span
+      className="picon"
+      style={{
+        background: id === 'tiktok' ? '#25f4ee' : id === 'x' ? '#111' : (p?.color ?? '#888'),
+        color: DARK_TEXT.has(id) ? '#111' : '#fff',
+        width: size,
+        height: size,
+        fontSize: size * 0.38
+      }}
+    >
+      {MARK[id] ?? (p?.name ?? '?').slice(0, 1).toUpperCase()}
+    </span>
+  )
+}
+
+export function Toggle({ on, onChange, disabled, title }: { on: boolean; onChange: (v: boolean) => void; disabled?: boolean; title?: string }) {
+  return (
+    <button
+      type="button"
+      className={`toggle ${on ? 'on' : ''}`}
+      disabled={disabled}
+      title={title}
+      aria-pressed={on}
+      onClick={(e) => {
+        e.stopPropagation()
+        onChange(!on)
+      }}
+    />
+  )
+}
+
+/** Connect (or replace) the one account for a platform. */
+export function ConnectDialog({ platform: p, onClose }: { platform: PlatformManifest; onClose: () => void }) {
+  const app = useApp()
+  const existing = app.accountFor(p.id)
+  const [input, setInput] = useState<Record<string, unknown>>(
+    Object.fromEntries(p.connectFields.filter((f) => f.default !== undefined).map((f) => [f.key, f.default]))
+  )
+  const [busy, setBusy] = useState(false)
+  const how: Record<string, string> = {
+    api: 'Your browser opens the platform’s sign-in page. Approve access, then come back here.',
+    browser: 'A browser window opens on the platform. Log in there (scan the QR code with the phone app); OneDraft keeps that login in its own profile.',
+    cli: 'A console window opens. Choose the QR-code login and scan it with the phone app.',
+    mcp: 'OneDraft checks that the MCP server is reachable and logged in.',
+    plugin: 'The plugin handles login.'
+  }
+  const connect = async () => {
+    setBusy(true)
+    try {
+      const values = Object.fromEntries(Object.entries(input).map(([k, v]) => [k, String(v ?? '')]))
+      const a = await call<Account>('accounts.connect', p.id, values)
+      app.toast(`${p.name} connected as ${a.name}.`)
+      onClose()
+    } catch (e) {
+      app.toast((e as Error).message, true)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Modal onClose={busy ? undefined : onClose}>
+      <div className="row" style={{ marginBottom: 6 }}>
+        <PlatformIcon p={p} size={34} />
+        <h2 style={{ margin: 0 }}>{existing ? `Replace your ${p.name} account` : `Connect ${p.name}`}</h2>
+      </div>
+      {existing && <div className="note" style={{ marginBottom: 10 }}>OneDraft keeps one account per platform. Signing in again replaces {existing.name}; drafts and scheduled posts move to the new account.</div>}
+      <p className="muted">{how[p.kind]}</p>
+      <div className="stack">
+        {p.connectFields.map((f) => (
+          <Field key={f.key} spec={f} value={input[f.key]} onChange={(v) => setInput((s) => ({ ...s, [f.key]: v }))} />
+        ))}
+        {p.notes.length > 0 && (
+          <div className="note">
+            {p.notes.map((n) => (
+              <div key={n}>• {n}</div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="actions">
+        {busy ? (
+          <>
+            <span className="muted small" style={{ alignSelf: 'center' }}>
+              Waiting for you to finish signing in…
+            </span>
+            <button className="btn" onClick={() => void call('accounts.cancelConnect', p.id)}>
+              Cancel
+            </button>
+          </>
+        ) : (
+          <>
+            <button className="btn ghost" onClick={onClose}>
+              Close
+            </button>
+            <button className="btn primary" onClick={connect}>
+              {existing ? 'Sign in with another account' : 'Connect'}
+            </button>
+          </>
+        )}
+      </div>
+    </Modal>
+  )
+}
 
 export function PlatformDot({ color, size = 10 }: { color?: string; size?: number }) {
   return <span className="pdot" style={{ background: color ?? '#888', width: size, height: size }} />
@@ -53,7 +169,7 @@ export function Status({ s }: { s: TargetStatus | string }) {
   return <span className={`pill ${cls}`}>{label}</span>
 }
 
-export function TagsInput({ value, onChange, placeholder }: { value: string[]; onChange: (v: string[]) => void; placeholder?: string }) {
+export function TagsInput({ value, onChange, placeholder, className }: { value: string[]; onChange: (v: string[]) => void; placeholder?: string; className?: string }) {
   const [draft, setDraft] = useState('')
   const add = (raw: string) => {
     const parts = raw
@@ -64,7 +180,7 @@ export function TagsInput({ value, onChange, placeholder }: { value: string[]; o
     setDraft('')
   }
   return (
-    <div className="tags-input">
+    <div className={`tags-input ${className ?? ''}`}>
       {value.map((t) => (
         <span className="tag" key={t}>
           #{t}
@@ -167,7 +283,7 @@ export function Field({ spec, value, onChange, secretSet }: { spec: FieldSpec; v
 export function Counter({ n, max }: { n: number; max?: number }) {
   if (!max) return <span className="counter faint small">{n}</span>
   return (
-    <span className={`counter small ${n > max ? 'over' : 'faint'}`}>
+    <span className={`counter ${n > max ? 'over' : 'ok'}`}>
       {n}/{max}
     </span>
   )

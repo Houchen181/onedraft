@@ -1,46 +1,47 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { ApprovalRequest, PlatformManifest, Post } from '@shared/types'
-import { Assistant } from './Assistant'
+import type { Account, ApprovalRequest, PlatformManifest, Post } from '@shared/types'
 import { call, on, useData } from './api'
-import { Accounts } from './pages/Accounts'
-import { Activity } from './pages/Activity'
-import { Compose } from './pages/Compose'
+import { Calendar } from './pages/Calendar'
+import { Chat } from './pages/Chat'
+import { PostEditor } from './pages/PostEditor'
 import { Posts } from './pages/Posts'
 import { Settings } from './pages/Settings'
 import { Studio } from './pages/Studio'
 import { Ctx, Modal, type AppCtx, type Page } from './ui'
 
 const NAV: [Page, string, string][] = [
-  ['compose', '✎', 'Compose'],
-  ['studio', '▶', 'Studio'],
-  ['posts', '☰', 'Posts'],
-  ['accounts', '◎', 'Accounts'],
-  ['activity', '↻', 'Activity'],
-  ['settings', '⚙', 'Settings']
+  ['chat', '✦', 'Chat'],
+  ['posts', '✎', 'Posts'],
+  ['calendar', '▦', 'Calendar'],
+  ['studio', '▶', 'Studio']
 ]
 
 export function App() {
-  const [page, setPage] = useState<Page>('compose')
-  const [composeId, setComposeId] = useState<string>()
-  const [composeKey, setComposeKey] = useState(0)
-  const [composeSeed, setComposeSeed] = useState<string[]>()
+  const [page, setPage] = useState<Page>('chat')
+  const [postId, setPostId] = useState<string>()
+  const [postKey, setPostKey] = useState(0)
+  const [seedMedia, setSeedMedia] = useState<string[]>()
   const [studioSeed, setStudioSeed] = useState<string>()
   const [platforms, setPlatforms] = useState<PlatformManifest[]>([])
   const [toasts, setToasts] = useState<{ id: number; text: string; error?: boolean }[]>([])
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([])
-  const [collapsed, setCollapsed] = useState(false)
   const [pendingAsk, setPendingAsk] = useState<string>()
+  const [assistantBusy, setAssistantBusy] = useState(false)
+  const { data: accounts } = useData<Account[]>('accounts.list', [], ['accounts'])
   const { data: posts } = useData<Post[]>('posts.list', [], ['posts'])
+  const { data: profile } = useData<{ values: Record<string, unknown> }>('settings.get', [], ['accounts'])
 
   const loadPlatforms = useCallback(() => void call<PlatformManifest[]>('platforms').then(setPlatforms), [])
   useEffect(loadPlatforms, [loadPlatforms, page])
-  useEffect(
-    () =>
-      on('approval', (r) => {
-        setApprovals((a) => [...a, r as ApprovalRequest])
-      }),
-    []
-  )
+  useEffect(() => on('changed', (k) => k === 'platforms' && loadPlatforms()), [loadPlatforms])
+  useEffect(() => on('approval', (r) => setApprovals((a) => [...a, r as ApprovalRequest])), [])
+  useEffect(() => {
+    void call<{ busy: boolean }>('agent.history').then((h) => setAssistantBusy(h.busy))
+    return on('agent', (e) => {
+      const ev = e as { type: string; busy?: boolean }
+      if (ev.type === 'busy') setAssistantBusy(!!ev.busy)
+    })
+  }, [])
 
   const toast = useCallback((text: string, error?: boolean) => {
     const id = Date.now() + Math.random()
@@ -51,32 +52,40 @@ export function App() {
   const ctx: AppCtx = useMemo(
     () => ({
       toast,
-      go: (p, postId) => {
-        if (p === 'compose') {
-          setComposeId(postId)
-          setComposeSeed(undefined)
-          setComposeKey((k) => k + 1)
+      go: (p, id) => {
+        if (p === 'post') {
+          setPostId(id)
+          setSeedMedia(undefined)
+          setPostKey((k) => k + 1)
         }
         setPage(p)
       },
+      ask: (text, opts) => {
+        if (opts?.background) {
+          void call('agent.send', text)
+          toast('Claude is on it — you can keep working.')
+        } else {
+          setPendingAsk(text)
+          setPage('chat')
+        }
+      },
       newPost: (media) => {
-        setComposeId(undefined)
-        setComposeSeed(media)
-        setComposeKey((k) => k + 1)
-        setPage('compose')
+        setPostId(undefined)
+        setSeedMedia(media)
+        setPostKey((k) => k + 1)
+        setPage('post')
       },
       openStudio: (path) => {
         setStudioSeed(path)
         setPage('studio')
       },
-      ask: (text) => {
-        setCollapsed(false)
-        setPendingAsk(text)
-      },
       platforms,
-      platform: (id) => platforms.find((p) => p.id === id)
+      platform: (id) => platforms.find((p) => p.id === id),
+      accounts: accounts ?? [],
+      accountFor: (platform) => (accounts ?? []).find((a) => a.platform === platform),
+      assistantBusy
     }),
-    [toast, platforms]
+    [toast, platforms, accounts, assistantBusy]
   )
 
   const active = (posts ?? []).filter((p) => ['queued', 'publishing', 'partial', 'failed'].includes(p.status)).length
@@ -85,42 +94,49 @@ export function App() {
     void call('approvals.respond', approval.id, ok)
     setApprovals((a) => a.slice(1))
   }
+  const name = String(profile?.values['profile.name'] ?? '') || accounts?.[0]?.name || 'You'
+  const connected = accounts?.filter((a) => a.status === 'connected').length ?? 0
 
   return (
     <Ctx.Provider value={ctx}>
       <div className="app">
-        <nav className="nav">
-          <div className="brand">
-            <span className="logo" />
-            Polycast
+        <aside className="side">
+          <div className="me">
+            <span className="logo">{name.slice(0, 1).toUpperCase()}</span>
+            <div style={{ minWidth: 0 }}>
+              <b>{name}</b>
+              <small>
+                {connected} platform{connected === 1 ? '' : 's'}
+              </small>
+            </div>
           </div>
           {NAV.map(([id, icon, label]) => (
-            <button key={id} className={page === id ? 'active' : ''} onClick={() => ctx.go(id)}>
-              <span className="icon">{icon}</span>
+            <button key={id} className={`nav ${page === id || (id === 'posts' && page === 'post') ? 'on' : ''}`} onClick={() => ctx.go(id)}>
+              <span className="ico">{icon}</span>
               {label}
+              {id === 'chat' && assistantBusy && <span className="pulse" title="Claude is working" />}
               {id === 'posts' && active > 0 && <span className="count">{active}</span>}
             </button>
           ))}
           <div className="spacer" />
-          <div className="faint small" style={{ padding: '0 10px' }}>
-            v0.1 · your accounts, your machine
-          </div>
-        </nav>
+          <button className={`nav ${page === 'settings' ? 'on' : ''}`} onClick={() => ctx.go('settings')}>
+            <span className="ico">⚙</span>Settings
+          </button>
+        </aside>
         <main className="main">
-          {page === 'compose' && <Compose key={composeKey} postId={composeId} seedMedia={composeSeed} onSaved={setComposeId} />}
-          {page === 'studio' && <Studio seed={studioSeed} onSeedTaken={() => setStudioSeed(undefined)} />}
+          {page === 'chat' && <Chat pending={pendingAsk} onPendingTaken={() => setPendingAsk(undefined)} />}
           {page === 'posts' && <Posts />}
-          {page === 'accounts' && <Accounts />}
-          {page === 'activity' && <Activity />}
+          {page === 'post' && <PostEditor key={postKey} postId={postId} seedMedia={seedMedia} onCreated={setPostId} />}
+          {page === 'calendar' && <Calendar />}
+          {page === 'studio' && <Studio seed={studioSeed} onSeedTaken={() => setStudioSeed(undefined)} />}
           {page === 'settings' && <Settings />}
         </main>
-        <Assistant collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} pending={pendingAsk} onPendingTaken={() => setPendingAsk(undefined)} />
       </div>
 
       {approval && (
         <Modal>
-          <div className="pill accent" style={{ marginBottom: 10 }}>
-            {approval.source === 'mcp' ? 'An MCP client' : 'The assistant'} is asking
+          <div className="pill custom" style={{ marginBottom: 10 }}>
+            {approval.source === 'mcp' ? 'An app connected over MCP' : 'Claude'} is asking
           </div>
           <h2>{approval.title}</h2>
           <div className="note" style={{ whiteSpace: 'pre-wrap', marginTop: 10 }}>
@@ -139,7 +155,7 @@ export function App() {
 
       <div className="toasts">
         {toasts.map((t) => (
-          <div key={t.id} className={`toast ${t.error ? 'err' : ''}`} style={{ whiteSpace: 'pre-wrap' }}>
+          <div key={t.id} className={`toast ${t.error ? 'err' : ''}`}>
             {t.text}
           </div>
         ))}

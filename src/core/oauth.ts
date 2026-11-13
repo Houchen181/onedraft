@@ -43,7 +43,7 @@ export function oauthLoopback(
         cleanup()
       }
       if (params.state !== state) {
-        done(false, 'State mismatch. Please try connecting again from Polycast.')
+        done(false, 'State mismatch. Please try connecting again from OneDraft.')
         reject(new Error('OAuth state mismatch'))
         return
       }
@@ -57,7 +57,7 @@ export function oauthLoopback(
         reject(new Error('No authorization code returned'))
         return
       }
-      done(true, 'You can close this tab and return to Polycast.')
+      done(true, 'You can close this tab and return to OneDraft.')
       resolve({ code: params.code, redirectUri, codeVerifier: verifier, params })
     })
 

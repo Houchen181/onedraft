@@ -11,6 +11,6 @@ const api = {
   }
 }
 
-contextBridge.exposeInMainWorld('polycast', api)
+contextBridge.exposeInMainWorld('onedraft', api)
 
-export type PolycastBridge = typeof api
+export type OneDraftBridge = typeof api

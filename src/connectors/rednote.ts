@@ -2,7 +2,7 @@
 // browser profile per account. No posting API exists for creators.
 //
 // Rednote's 2026-08 rules penalise accounts run automatically by scripts or AI tools, so the default
-// is HANDOFF: Polycast fills in the note and leaves the window open; you press 发布 yourself.
+// is HANDOFF: OneDraft fills in the note and leaves the window open; you press Publish yourself.
 // Selectors live in SELECTORS and can be overridden from Settings (JSON) when the site changes,
 // and every failure saves a screenshot + page HTML for repair.
 
@@ -105,7 +105,7 @@ function formatCnTime(iso: string): string {
 export const rednote: Connector = {
   manifest: {
     id: 'rednote',
-    name: 'Rednote 小红书',
+    name: 'Rednote',
     kind: 'browser',
     color: '#ff2442',
     source: 'builtin',
@@ -121,7 +121,7 @@ export const rednote: Connector = {
       stats: false
     },
     constraints: {
-      title: { max: 20 },
+      title: { max: 20, unit: 'halfAscii' },
       caption: { max: 1000 },
       tags: { style: 'field', max: 10 },
       video: { preferredAspect: '9:16', formats: ['mp4', 'mov'] },
@@ -149,8 +149,8 @@ export const rednote: Connector = {
         type: 'select',
         default: 'handoff',
         options: [
-          { value: 'handoff', label: 'Fill it in, I press 发布 (recommended)' },
-          { value: 'auto', label: 'Press 发布 for me' }
+          { value: 'handoff', label: 'Fill it in, I press Publish (recommended)' },
+          { value: 'auto', label: 'Press Publish for me' }
         ],
         help: 'Rednote penalises accounts run by scripts; keeping a person on the button is safer.'
       },
@@ -160,22 +160,17 @@ export const rednote: Connector = {
         type: 'select',
         default: 'public',
         options: [
-          { value: 'public', label: '公开可见 Public' },
-          { value: 'private', label: '仅自己可见 Only me' }
+          { value: 'public', label: 'Public' },
+          { value: 'private', label: 'Only me' }
         ]
       }
     ],
     notes: [
       'Logs in through a real browser window: scan the QR code with the Rednote app.',
-      'One web session per account: logging in on another computer’s browser signs Polycast out.',
-      'Polycast declares AI content (笔记含AI合成内容) when the post is marked AI-generated.',
+      'One web session per account: logging in on another computer’s browser signs OneDraft out.',
+      'OneDraft sets Rednote’s AI-content declaration when the post is marked AI-generated.',
       'Rednote allows roughly 50 posts a day; titles are 20 characters (English letters count half).'
     ]
-  },
-
-  validate(content) {
-    const n = rednoteTitleLength(content.title)
-    return n > 20 ? [{ level: 'error', field: 'title', message: `Rednote title is ${n} (English letters count half); the limit is 20.` }] : []
   },
 
   async connect(ctx, input) {
@@ -184,7 +179,7 @@ export const rednote: Connector = {
     const page = browser.pages()[0] ?? (await browser.newPage())
     try {
       await page.goto(`${CREATOR}/login`, { waitUntil: 'domcontentloaded' })
-      ctx.log('Scan the QR code in the browser window with the Rednote app (switch to 扫码登录 if needed).')
+      ctx.log('Scan the QR code in the browser window with the Rednote app (switch to QR-code login if needed).')
       const deadline = Date.now() + 5 * 60_000
       while (Date.now() < deadline) {
         await page.waitForTimeout(2000)
@@ -290,9 +285,9 @@ export const rednote: Connector = {
       }
 
       if (handoff || !declared) {
-        // Leave the window open for the person to check and press 发布.
+        // Leave the window open for the person to check and press Publish.
         await page.bringToFront()
-        const reason = !declared ? 'Could not find the AI declaration; tick 内容类型声明 → 笔记含AI合成内容, then press 发布.' : 'Check the note and press 发布 in the browser window.'
+        const reason = !declared ? 'Could not find the AI-content declaration; set it in the note’s content-type declaration, then press Publish.' : 'Check the note and press Publish in the browser window.'
         ctx.log(reason)
         browser = undefined // keep it open
         return { state: 'handoff', note: reason }
@@ -304,7 +299,7 @@ export const rednote: Connector = {
         await page.waitForURL(/publish\/success|\/new\/note-manager/, { timeout: 60_000 })
       } catch {
         const shot = await snapshot(page, ctx, 'after-publish')
-        throw new UnconfirmedError(`Pressed 发布 but Rednote did not confirm.${shot ? ` Screenshot: ${shot}` : ''} Check your notes before retrying.`)
+        throw new UnconfirmedError(`Pressed Publish but Rednote did not confirm.${shot ? ` Screenshot: ${shot}` : ''} Check your notes before retrying.`)
       }
       return { state: publishAt ? 'scheduled' : 'published', note: 'Rednote does not show the note link right away; find it in the note manager.' }
     } catch (e) {

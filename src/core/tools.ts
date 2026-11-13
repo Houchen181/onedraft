@@ -83,7 +83,7 @@ function summarizePost(engine: Engine, id: string) {
 export const TOOLS: ToolDef[] = [
   def({
     name: 'list_platforms',
-    description: 'List the platforms Polycast can post to, with what each supports (video/image/text, native scheduling, comments).',
+    description: 'List the platforms OneDraft can post to, with what each supports (video/image/text, native scheduling, comments).',
     schema: z.object({}),
     async run(_i, { engine }) {
       return engine.registry.manifests().map((m) => ({ id: m.id, name: m.name, kind: m.kind, capabilities: m.capabilities, notes: m.notes }))
@@ -129,20 +129,30 @@ export const TOOLS: ToolDef[] = [
   def({
     name: 'create_post',
     description:
-      'Create a DRAFT post for one or more accounts. Master title/body/tags/media apply everywhere unless a variant overrides them. Nothing is published until approved.',
+      'Create a DRAFT post. The person has one account per platform, so name the platforms to post to (e.g. ["youtube","rednote"]). The main title/body/tags/media apply everywhere unless a platform version overrides them. Nothing is published until approved.',
     schema: z.object({
       title: z.string().default(''),
       body: z.string().default(''),
       tags: z.array(z.string()).default([]),
       media: z.array(z.string()).default([]).describe('Absolute local file paths'),
       aiGenerated: z.boolean().default(false).describe('True if the content was made or substantially altered by AI (sets platform disclosure labels). Forced on when any media comes from generate_video.'),
-      accountIds: z.array(z.string()).min(1),
-      variants: z.array(z.object({ accountId: z.string(), ...variantShape })).optional(),
+      platforms: z.array(z.string()).optional().describe('Platform ids from list_accounts, e.g. youtube, rednote, bilibili, instagram, tiktok, x'),
+      accountIds: z.array(z.string()).optional().describe('Alternative to platforms'),
+      variants: z.array(z.object({ platform: z.string().optional(), accountId: z.string().optional(), ...variantShape })).optional().describe('Per-platform versions; give platform (or accountId)'),
       scheduledAt: z.string().optional().describe('ISO 8601 time to publish; omit for "as soon as approved"')
     }),
     async run(i, { engine }) {
-      const vmap = new Map((i.variants ?? []).map(({ accountId, ...v }) => [accountId, v]))
-      for (const id of i.accountIds) engine.mustAccount(id)
+      const byPlatform = (p: string) => {
+        const a = engine.store.accountFor(p)
+        if (!a) throw new Error(`No ${p} account is connected.`)
+        return a.id
+      }
+      const ids = [...new Set([...(i.platforms ?? []).map(byPlatform), ...(i.accountIds ?? [])])]
+      if (!ids.length) throw new Error('Name at least one platform.')
+      for (const id of ids) engine.mustAccount(id)
+      const vmap = new Map(
+        (i.variants ?? []).map(({ platform, accountId, ...v }) => [accountId ?? (platform ? byPlatform(platform) : ''), v])
+      )
       const post = engine.savePost({
         title: i.title,
         body: i.body,
@@ -150,7 +160,7 @@ export const TOOLS: ToolDef[] = [
         media: i.media,
         aiGenerated: i.aiGenerated,
         scheduledAt: i.scheduledAt,
-        targets: i.accountIds.map((accountId) => ({ accountId, variant: vmap.get(accountId) ?? {} }))
+        targets: ids.map((accountId) => ({ accountId, variant: vmap.get(accountId) ?? {} }))
       })
       return { ...summarizePost(engine, post.id), issues: await engine.validatePost(post.id) }
     }
@@ -332,9 +342,9 @@ Pass projectId to change an existing edit.`,
   }),
   def({
     name: 'generate_video',
-    description: `Create an AI-generated video by writing it as HTML. Polycast renders the page frame by frame (deterministically) into an MP4 and labels it AI-generated.
-The page is sized width×height = 1080×1920 for 9:16, 1920×1080 for 16:9, 1080×1080 for 1:1, 1080×1350 for 4:5, 1080×1440 for 3:4 (also in window.POLYCAST {width,height,duration,fps}).
-Animate with CSS @keyframes / transitions or the Web Animations API, using animation-delay to place things in time; Polycast pauses every animation and sets its time for each frame. For canvas or JS-driven visuals define window.polycastSeek = (t) => { draw the frame at t seconds } (may be async). Do not rely on setTimeout, setInterval or requestAnimationFrame for timing. No network: inline everything (SVG, CSS, data: URIs); local images/videos can be used as file:///C:/... URLs. System fonts: "Segoe UI", "Microsoft YaHei" (Chinese), "Segoe UI Emoji".
+    description: `Create an AI-generated video by writing it as HTML. OneDraft renders the page frame by frame (deterministically) into an MP4 and labels it AI-generated.
+The page is sized width×height = 1080×1920 for 9:16, 1920×1080 for 16:9, 1080×1080 for 1:1, 1080×1350 for 4:5, 1080×1440 for 3:4 (also in window.ONEDRAFT {width,height,duration,fps}).
+Animate with CSS @keyframes / transitions or the Web Animations API, using animation-delay to place things in time; OneDraft pauses every animation and sets its time for each frame. For canvas or JS-driven visuals define window.onedraftSeek = (t) => { draw the frame at t seconds } (may be async). Do not rely on setTimeout, setInterval or requestAnimationFrame for timing. No network: inline everything (SVG, CSS, data: URIs); local images/videos can be used as file:///C:/... URLs. System fonts: "Segoe UI", "Microsoft YaHei" (Chinese), "Segoe UI Emoji".
 narration: {text, voice?, rate? (-10..10)} is spoken with a Windows voice (list_voices) and mixed in; keep it shorter than durationSec (≈ 2.5 words or 4 Chinese characters per second). music: {src, volume?}.
 Pass projectId to change an existing generated video. Rendering takes about 2 s per second of 30 fps video.`,
     schema: z.object({
@@ -391,7 +401,7 @@ Pass projectId to change an existing generated video. Rendering takes about 2 s 
   def({
     name: 'approve_post',
     description:
-      'Approve a post for publishing (now, or at publishAt). The person must confirm in Polycast unless they turned on auto-approve. Validate first.',
+      'Approve a post for publishing (now, or at publishAt). The person must confirm in OneDraft unless they turned on auto-approve. Validate first.',
     schema: z.object({ postId: z.string(), publishAt: z.string().optional().describe('ISO 8601; omit to publish now') }),
     async run({ postId, publishAt }, env) {
       const s = summarizePost(env.engine, postId)
@@ -423,18 +433,18 @@ Pass projectId to change an existing generated video. Rendering takes about 2 s 
     async run({ accountId, remoteId, limit }, { engine }) {
       const a = engine.mustAccount(accountId)
       const c = engine.connector(a.platform)
-      if (!c.listComments) return { error: `${c.manifest.name} comments are not available through Polycast.` }
+      if (!c.listComments) return { error: `${c.manifest.name} comments are not available through OneDraft.` }
       return c.listComments(engine.makeContext(a.platform, a, a.id), a, { remoteId, limit })
     }
   }),
   def({
     name: 'reply_comment',
-    description: 'Reply to a comment. The person must confirm the exact text in Polycast first.',
+    description: 'Reply to a comment. The person must confirm the exact text in OneDraft first.',
     schema: z.object({ accountId: z.string(), commentId: z.string(), remoteId: z.string().optional(), text: z.string().min(1) }),
     async run({ accountId, commentId, remoteId, text }, env) {
       const a = env.engine.mustAccount(accountId)
       const c = env.engine.connector(a.platform)
-      if (!c.reply) return { error: `${c.manifest.name} replies are not available through Polycast.` }
+      if (!c.reply) return { error: `${c.manifest.name} replies are not available through OneDraft.` }
       const ok = await env.requestApproval({ title: `Reply on ${c.manifest.name} as ${a.name}?`, detail: text, source: env.source })
       if (!ok) return { sent: false, message: 'The person declined.' }
       return { sent: true, ...(await c.reply(env.engine.makeContext(a.platform, a, a.id), a, { commentId, remoteId, text })) }

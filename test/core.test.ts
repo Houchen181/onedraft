@@ -24,7 +24,7 @@ let dir: string
 let video: string
 
 beforeAll(() => {
-  dir = mkdtempSync(join(tmpdir(), 'polycast-test-'))
+  dir = mkdtempSync(join(tmpdir(), 'onedraft-test-'))
   video = join(dir, 'clip.mp4')
   const r = spawnSync(tools.ffmpeg, ['-y', '-f', 'lavfi', '-i', 'testsrc=size=1280x720:rate=30', '-f', 'lavfi', '-i', 'sine=frequency=440', '-t', '4', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', video])
   if (r.status !== 0) throw new Error(r.stderr.toString())
@@ -67,6 +67,14 @@ describe('validation', () => {
     expect(msgs).toMatch(/4 tags/)
     expect(msgs).toMatch(/90 s/)
     expect(msgs).toMatch(/9:16; Fake accepts 16:9/)
+  })
+  it('measures Rednote titles with English letters counting half', () => {
+    const rednote = BUILTINS.find((c) => c.manifest.id === 'rednote')!
+    const base = { caption: 'x', tags: [], media: [], options: {}, aiGenerated: false }
+    const ok = validateContent(rednote.manifest, { ...base, title: 'Kyoto in 48h 🍁 autumn guide' }, [])
+    expect(ok.filter((i) => i.field === 'title')).toEqual([])
+    const long = validateContent(rednote.manifest, { ...base, title: 'A much longer English title that will not fit' }, [])
+    expect(long.find((i) => i.field === 'title')?.message).toMatch(/English letters count half/)
   })
   it('turns X overflow into a thread warning', () => {
     const x = BUILTINS.find((c) => c.manifest.id === 'x')!
@@ -195,6 +203,16 @@ describe('engine', () => {
     return { store, engine, post, calls }
   }
   const settle = () => new Promise((r) => setTimeout(r, 50))
+
+  it('keeps one account per platform; reconnecting replaces it in place', () => {
+    const { store, post } = setup(async () => ({ state: 'published' }))
+    const before = store.accountFor('fake')!
+    const after = store.upsertAccount({ platform: 'fake', remoteUserId: 'someone-else', name: 'Other login' })
+    expect(after.id).toBe(before.id)
+    expect(after.name).toBe('Other login')
+    expect(store.listAccounts().filter((a) => a.platform === 'fake')).toHaveLength(1)
+    expect(store.getPost(post.id)!.targets[0].accountId).toBe(before.id)
+  })
 
   it('keeps target ids across saves', () => {
     const { engine, post } = setup(async () => ({ state: 'published' }))

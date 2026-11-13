@@ -1,0 +1,145 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Platform panels</title>
+<style>
+:root{--bg:#f7f5f0;--panel:#fffdf9;--ink:#1f1e1b;--muted:#6f6b62;--faint:#a39d91;--line:#e7e2d8;--accent:#2f6b57;--accent-soft:#e3efe9;--custom:#5b5bf6;--custom-soft:#eceeff}
+*{box-sizing:border-box}body{margin:0;width:1440px;height:900px;background:var(--bg);color:var(--ink);font-family:"Segoe UI","Microsoft YaHei",sans-serif;display:grid;grid-template-columns:200px 1fr 390px;overflow:hidden}
+/* app sidebar */
+.sb{border-right:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column;padding:14px 12px;gap:4px}
+.brand{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--line);border-radius:12px;margin-bottom:10px}
+.blogo{width:30px;height:30px;border-radius:9px;background:linear-gradient(135deg,#ff8a4c,#e2456b);display:grid;place-items:center;color:#fff;font-weight:800}
+.brand b{font-size:14px;display:block}.brand small{color:var(--muted);font-size:11.5px}.caret{margin-left:auto;color:var(--muted)}
+.nav{padding:8px 10px;border-radius:10px;color:var(--muted);font-size:14px}.nav.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.sec{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);margin:16px 10px 6px}
+.acc{display:flex;align-items:center;gap:10px;padding:6px 10px;border-radius:10px;font-size:13px}.acc.on{background:#efe9de;font-weight:600}
+.av{width:26px;height:26px;border-radius:50%;position:relative;flex:none;display:grid;place-items:center;color:#fff;font-size:10.5px;font-weight:700;background:#e46a3f}
+.av i{position:absolute;right:-3px;bottom:-3px;width:13px;height:13px;border-radius:4px;border:2px solid var(--panel);font-style:normal;font-size:6.5px;display:grid;place-items:center;font-weight:800;color:#fff}
+.all{width:26px;height:26px;border-radius:8px;background:#e9e3d8;display:grid;place-items:center;font-size:12px}
+.sp{flex:1}
+.pf{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;color:#fff;font-size:11px;font-weight:800;flex:none}
+.pn b{display:block;font-size:13px;font-weight:600}.pn small{display:block;font-size:11px;color:var(--muted)}
+.on-dot{margin-left:auto;width:8px;height:8px;border-radius:50%;background:#2fb37a}
+.conn{margin-left:auto;font-size:11.5px;color:var(--accent);border:1px solid var(--accent);border-radius:99px;padding:1px 8px}
+/* editor */
+.ed{display:flex;flex-direction:column;min-width:0}
+.top{height:58px;display:flex;align-items:center;gap:12px;padding:0 24px;border-bottom:1px solid var(--line)}
+.top h1{font-family:Georgia,serif;font-weight:500;font-size:20px;margin:0}.back{color:var(--muted);font-size:13px}
+.btn{border:1px solid var(--line);background:var(--panel);border-radius:10px;padding:8px 14px;font-size:13px}.btn.p{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.body{flex:1;display:grid;grid-template-columns:262px 1fr;min-height:0}
+.plist{border-right:1px solid var(--line);padding:14px 10px;display:flex;flex-direction:column;gap:4px}
+.pi{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:12px;font-size:13px;border:1px solid transparent}
+.pi.on{background:var(--panel);border-color:var(--line);box-shadow:0 6px 18px -12px rgba(60,40,10,.4)}
+.pi .ic{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;color:#fff;font-size:12px;font-weight:800;flex:none}
+.pi b{display:block;font-size:13px}.pi small{display:block;font-size:11px;color:var(--muted)}
+.pi .bad{margin-left:auto;font-size:10.5px;border-radius:99px;padding:1px 7px;white-space:nowrap}
+.pi div{min-width:0}.pi small,.pi b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.f-m{background:#efe9de;color:var(--muted)}.f-c{background:var(--custom-soft);color:var(--custom)}.f-w{background:#fdf0dc;color:#a8620f}
+.addp{font-size:12.5px;color:var(--accent);padding:8px 10px}
+.grp{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);margin:12px 10px 4px}
+.sw{width:30px;height:18px;border-radius:99px;background:var(--accent);position:relative;flex:none;margin-left:6px}.sw::after{content:"";position:absolute;right:2px;top:2px;width:14px;height:14px;border-radius:50%;background:#fff}
+.sw.off{background:#d8d2c6;margin-left:auto}.sw.off::after{left:2px;right:auto}
+.pi.off{opacity:.75}.pi .conn{margin-left:auto;font-size:11px;color:var(--accent);border:1px solid var(--accent);border-radius:99px;padding:1px 8px}
+.panel{padding:0;overflow:hidden;display:flex;flex-direction:column}
+.band{height:96px;padding:18px 26px;display:flex;align-items:center;gap:14px;color:#fff}
+.band .ic{width:46px;height:46px;border-radius:14px;background:rgba(255,255,255,.2);display:grid;place-items:center;font-size:20px;font-weight:800}
+.band b{font-size:19px;display:block;white-space:nowrap}.band small{opacity:.85;font-size:12.5px;white-space:nowrap}
+.band .stat{margin-left:auto;background:rgba(255,255,255,.18);border-radius:99px;padding:5px 12px;font-size:12px;white-space:nowrap}
+.fields{padding:18px 26px;display:flex;flex-direction:column;gap:14px;overflow:hidden}
+.fl{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin-bottom:5px}.fl .sp{flex:1}
+.tagm{font-size:11px;border-radius:99px;padding:2px 8px}.tm{background:#efe9de;color:var(--muted)}.tc{background:var(--custom-soft);color:var(--custom);font-weight:600}
+.reset{font-size:11.5px;color:var(--custom)}
+.box{border:1px solid var(--line);border-radius:12px;padding:10px 12px;font-size:14px;line-height:1.5;background:#fff}
+.box.follow{border-style:dashed;color:var(--faint);background:#fbf9f4}
+.box.custom{border-color:#c9c9fb}
+.cnt{font-size:11px}.ok{color:#1f9d6b}
+.media{display:flex;gap:12px;align-items:center}.media svg{border-radius:10px}
+.opts{display:flex;gap:8px;flex-wrap:wrap}.opt{font-size:12.5px;border:1px solid var(--line);border-radius:10px;padding:7px 11px;background:#fff}.opt b{font-weight:600}
+.ai{display:flex;gap:8px}.ai span{font-size:12.5px;color:var(--custom);background:var(--custom-soft);border-radius:10px;padding:8px 12px}
+/* preview */
+.pv{border-left:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column}
+.pv .hd{height:58px;display:flex;align-items:center;padding:0 20px;border-bottom:1px solid var(--line);font-weight:600;gap:8px}
+.phone{margin:20px auto 0;width:262px;height:540px;border-radius:34px;background:#111;padding:9px;box-shadow:0 30px 60px -30px rgba(0,0,0,.5)}
+.scr{width:100%;height:100%;border-radius:26px;background:#fff;overflow:hidden;display:flex;flex-direction:column}
+.cover{height:330px;position:relative}.cover svg{width:100%;height:100%}
+.ctitle{position:absolute;left:14px;right:14px;bottom:16px;color:#fff;font-weight:800;font-size:21px;line-height:1.25;text-shadow:0 2px 12px rgba(0,0,0,.45)}
+.nb{padding:10px 14px;font-size:12.5px;line-height:1.5}.nb b{display:block;font-size:14px;margin-bottom:3px}.tags{color:#2f5fbd}
+.yt{margin:20px;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:#fff}.yt svg{width:100%;height:197px;display:block}
+.yt .m{padding:12px 14px}.yt .m b{font-size:15px;line-height:1.3;display:block}.yt .m small{display:block;color:#666;font-size:12px;margin-top:6px}
+.yt .ch{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12.5px}.yt .desc{margin-top:10px;font-size:12px;color:#444;background:#f2f2f2;border-radius:10px;padding:9px 10px;line-height:1.5}
+.hint{margin:14px 20px 0;font-size:12px;color:var(--muted);line-height:1.5}
+
+</style></head><body>
+<svg width="0" height="0" style="position:absolute"><defs>
+<linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffb36b"/><stop offset=".55" stop-color="#ff6f7d"/><stop offset="1" stop-color="#6a4bd6"/></linearGradient>
+<symbol id="trip" viewBox="0 0 160 90"><rect width="160" height="90" fill="url(#sky)"/><circle cx="112" cy="36" r="13" fill="#fff3d6"/>
+<path d="M0 62 L28 40 L46 54 L70 30 L98 58 L122 44 L160 64 L160 90 L0 90Z" fill="#3a2366" opacity=".85"/><path d="M0 72 L36 56 L64 68 L96 52 L130 70 L160 62 L160 90 L0 90Z" fill="#24164a"/></symbol></defs></svg>
+
+<aside class="sb">
+  <div class="brand"><div class="blogo">M</div><div><b>Maple Travels</b><small>5 platforms</small></div></div>
+  <div class="nav">✦ Chat</div><div class="nav on">✎ Posts</div><div class="nav">▦ Calendar</div><div class="nav">▶ Studio</div>
+  <div class="sp"></div><div class="nav">⚙ Settings</div>
+</aside>
+
+<main class="ed">
+  <div class="top"><span class="back">‹ Posts</span><h1>Kyoto in 48 hours</h1><span class="sp" style="flex:1"></span><span class="btn">Fri, Nov 14 · 7:00 PM</span><span class="btn p">Approve &amp; schedule</span></div>
+  <div class="body">
+    <nav class="plist">
+      <div class="pi" data-item="main"><span class="ic" style="background:#3d3a33">◎</span><div><b>Main post</b><small>shared by all</small></div></div>
+      <div class="grp">Posting to</div>
+      <div class="pi" data-item="youtube"><span class="ic" style="background:#ff0033">▶</span><div><b>YouTube</b><small>Maple Travels</small></div><span class="bad f-m">main</span><span class="sw"></span></div>
+      <div class="pi" data-item="rednote"><span class="ic" style="background:#ff2442">R</span><div><b>Rednote</b><small>Maple Travels</small></div><span class="bad f-c">4 custom</span><span class="sw"></span></div>
+      <div class="pi" data-item="bilibili"><span class="ic" style="background:#00a1d6">B</span><div><b>Bilibili</b><small>Maple Travels</small></div><span class="bad f-w">1 to fix</span><span class="sw"></span></div>
+      <div class="pi" data-item="x"><span class="ic" style="background:#111">X</span><div><b>X</b><small>@mapletravels</small></div><span class="bad f-c">2 custom</span><span class="sw"></span></div>
+      <div class="grp">Not in this post</div>
+      <div class="pi off"><span class="ic" style="background:#e1306c">IG</span><div><b>Instagram</b><small>@maple.travels</small></div><span class="sw off"></span></div>
+      <div class="pi off"><span class="ic" style="background:#25f4ee;color:#111">T</span><div><b>TikTok</b><small>not connected</small></div><span class="conn">Connect</span></div>
+    </nav>
+
+    <!-- Rednote panel -->
+    <section class="panel" data-p="rednote">
+      <div class="band" style="background:linear-gradient(120deg,#ff2442,#ff6b81)"><span class="ic">R</span><div><b>Rednote version</b><small>Maple Travels · note with video</small></div><span class="stat">4 changed for Rednote · rest follows main</span></div>
+      <div class="fields">
+        <div><div class="fl">Title <span class="cnt ok">16 / 20</span><span class="sp"></span><span class="tagm tc">● custom</span><span class="reset">↺ use main</span></div><div class="box custom">Kyoto in 48h 🍁 autumn guide</div></div>
+        <div><div class="fl">Text <span class="cnt ok">118 / 1000</span><span class="sp"></span><span class="tagm tc">● custom</span><span class="reset">↺ use main</span></div><div class="box custom">Two days, three temples, three hidden matcha spots — the whole route is in the pics. Go at 7 am to beat the crowds!</div></div>
+        <div><div class="fl">Topics <span class="sp"></span><span class="tagm tc">● custom</span><span class="reset">↺ use main</span></div><div class="box custom">#kyoto #autumnleaves #japantrip</div></div>
+        <div><div class="fl">Video <span class="sp"></span><span class="tagm tc">● custom</span><span class="reset">↺ use main</span></div>
+          <div class="media"><svg viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice" style="width:62px;height:110px"><use href="#trip"/></svg><div style="font-size:13px;line-height:1.6">9:16 cut · 0:50<br><span style="color:var(--muted)">from kyoto-48h-final.mp4 · opens on the maple tunnel</span><br><span style="color:var(--custom)">Edit cut in Studio ›</span></div></div></div>
+        <div class="opts"><span class="opt">Visibility <b>Public</b></span><span class="opt">Publishing <b>I press Publish</b></span><span class="opt">AI label <b>Off</b></span></div>
+        <div class="ai"><span>✨ Rewrite for Rednote</span><span>✨ Translate from main</span><span>✨ Suggest topics</span></div>
+      </div>
+    </section>
+
+    <!-- YouTube panel -->
+    <section class="panel" data-p="youtube">
+      <div class="band" style="background:linear-gradient(120deg,#d90429,#ff3d57)"><span class="ic">▶</span><div><b>YouTube version</b><small>Maple Travels · video</small></div><span class="stat">Everything follows the main post</span></div>
+      <div class="fields">
+        <div><div class="fl">Title <span class="cnt ok">40 / 100</span><span class="sp"></span><span class="tagm tm">↳ from main</span></div><div class="box follow">Kyoto in 48 Hours: Autumn Leaves &amp; Tea</div></div>
+        <div><div class="fl">Description <span class="cnt ok">182 / 5000</span><span class="sp"></span><span class="tagm tm">↳ from main</span></div><div class="box follow">Two days, one city, a lot of maple leaves 🍁 Here’s our full Kyoto route: Eikandō at sunrise, the Philosopher’s Path, and three tea houses worth the queue.</div></div>
+        <div><div class="fl">Tags <span class="sp"></span><span class="tagm tm">↳ from main</span></div><div class="box follow">kyoto, japan travel, autumn leaves, travel vlog</div></div>
+        <div><div class="fl">Video <span class="sp"></span><span class="tagm tm">↳ from main</span></div>
+          <div class="media"><svg viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice" style="width:176px;height:99px"><use href="#trip"/></svg><div style="font-size:13px;line-height:1.6">16:9 · 8:42<br><span style="color:var(--muted)">kyoto-48h-final.mp4</span><br><span style="color:var(--custom)">Thumbnail: frame at 0:12 ›</span></div></div></div>
+        <div class="opts"><span class="opt">Visibility <b>Public</b></span><span class="opt">Category <b>Travel &amp; Events</b></span><span class="opt">Made for kids <b>No</b></span></div>
+        <div class="ai"><span>✨ Rewrite for YouTube</span><span>✨ Add chapters</span><span>✨ SEO title ideas</span></div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<aside class="pv">
+  <div class="hd" data-p="rednote">Preview · Rednote</div>
+  <div class="hd" data-p="youtube">Preview · YouTube</div>
+  <div data-p="rednote"><div class="phone"><div class="scr">
+    <div class="cover"><svg viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><use href="#trip"/></svg><div class="ctitle">Kyoto in 48h 🍁<br>autumn guide</div></div>
+    <div class="nb"><b>Kyoto in 48h 🍁 autumn guide</b>Two days, three temples, three hidden matcha spots — the whole route is in the pics.</div>
+    <div class="nb tags">#kyoto #autumnleaves #japantrip</div></div></div></div>
+  <div data-p="youtube"><div class="yt"><svg viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><use href="#trip"/></svg>
+    <div class="m"><b>Kyoto in 48 Hours: Autumn Leaves &amp; Tea</b><small>Premieres Fri, Nov 14 · 7:00 PM</small>
+    <div class="ch"><span class="av" style="width:24px;height:24px">M</span><b style="font-size:12.5px">Maple Travels</b></div>
+    <div class="desc">Two days, one city, a lot of maple leaves 🍁 Here’s our full Kyoto route: Eikandō at sunrise, the Philosopher’s Path…</div></div></div></div>
+  <div class="hint">Each platform has its own panel. Change something here and it changes for this platform only.</div>
+</aside>
+<script>
+const p = new URLSearchParams(location.search).get('p') || 'rednote'
+document.querySelectorAll('[data-p]').forEach((e) => { if (e.dataset.p !== p) e.style.display = 'none' })
+document.querySelector('[data-item="' + p + '"]').classList.add('on')
+</script>
+</body></html>

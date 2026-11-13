@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
-import type { FieldSpec, SettingsView } from '@shared/types'
+import type { FieldSpec, LogEvent, PlatformManifest, SettingsView } from '@shared/types'
 import { call, useData } from '../api'
-import { Field, PlatformDot, useApp } from '../ui'
+import { Avatar, ConnectDialog, Field, PlatformIcon, Status, useApp } from '../ui'
+
+const PROFILE_FIELD: FieldSpec = { key: 'profile.name', label: 'Your name', type: 'text', placeholder: 'Shown at the top of the sidebar' }
 
 interface McpInfo {
   enabled: boolean
@@ -119,7 +121,7 @@ function EngineStatus({ ai }: { ai: AiStatus }) {
         </>
       )}
       <div className="help" style={{ marginTop: 6 }}>
-        Polycast starts your own Claude Code with only Polycast’s tools and never sees your Claude login. For your own use: Anthropic doesn’t allow apps to offer
+        OneDraft starts your own Claude Code with only OneDraft’s tools and never sees your Claude login. For your own use: Anthropic doesn’t allow apps to offer
         Claude plan sign-in to other people.
       </div>
     </div>
@@ -143,7 +145,26 @@ export function Settings() {
   const set = (k: string, v: unknown) => setEdits((s) => ({ ...s, [k]: v }))
   const isSecret = (k: string, spec?: FieldSpec) => spec?.type === 'secret'
 
+  const [connectP, setConnectP] = useState<PlatformManifest>()
+  const [setupOpen, setSetupOpen] = useState<string>()
+  const [busyAcct, setBusyAcct] = useState<string>()
+  const { data: events } = useData<LogEvent[]>('events.list', [150], ['events'])
+  const missing = (p: PlatformManifest) =>
+    p.settings.filter((s) => s.required && !(value(`${p.id}.${s.key}`) || settings?.secretsSet.includes(`${p.id}.${s.key}`)))
+  const acctAction = async (id: string, fn: () => Promise<unknown>, ok?: string) => {
+    setBusyAcct(id)
+    try {
+      await fn()
+      if (ok) app.toast(ok)
+    } catch (e) {
+      app.toast((e as Error).message, true)
+    } finally {
+      setBusyAcct(undefined)
+    }
+  }
+
   const allSpecs: FieldSpec[] = [
+    PROFILE_FIELD,
     ENGINE_FIELD,
     ...CC_FIELDS,
     ...API_FIELDS,
@@ -206,7 +227,106 @@ export function Settings() {
         </button>
       </div>
 
-      <div className="card">
+      <div className="snav">
+        {[
+          ['platforms', 'Platforms'],
+          ['assistant', 'Assistant'],
+          ['mcp', 'Use from Claude Code'],
+          ['media', 'Media host'],
+          ['connectors', 'Add a platform'],
+          ['app', 'App'],
+          ['activity', 'Activity']
+        ].map(([id, label]) => (
+          <a key={id} href={`#s-${id}`}>
+            {label}
+          </a>
+        ))}
+      </div>
+
+      <div className="card" id="s-platforms">
+        <h2>Platforms</h2>
+        <p className="muted small" style={{ marginTop: -6 }}>
+          One account per platform. Signing in with a different account replaces the old one.
+        </p>
+        <div style={{ maxWidth: 360, marginBottom: 6 }}>
+          <Field spec={PROFILE_FIELD} value={value('profile.name')} onChange={(v) => set('profile.name', v)} />
+        </div>
+        {app.platforms.map((p) => {
+          const a = app.accountFor(p.id)
+          const miss = missing(p)
+          const open = setupOpen === p.id
+          return (
+            <div className="prow" key={p.id}>
+              <PlatformIcon p={p} size={34} />
+              <div style={{ minWidth: 0 }}>
+                <div className="row" style={{ gap: 8 }}>
+                  <b>{p.name}</b>
+                  {a && <Status s={a.status} />}
+                </div>
+                {a ? (
+                  <div className="acct">
+                    <Avatar url={a.avatarUrl} name={a.name} color={p.color} />
+                    {a.name}
+                    {a.handle && <span className="faint">{a.handle}</span>}
+                    {a.statusNote && <span className="faint"> · {a.statusNote.slice(0, 120)}</span>}
+                  </div>
+                ) : (
+                  <div className="acct">{miss.length ? 'Needs a one-time setup first' : 'Not connected'}</div>
+                )}
+              </div>
+              <div className="row">
+                {p.settings.length > 0 && (
+                  <button className="btn ghost sm" onClick={() => setSetupOpen(open ? undefined : p.id)}>
+                    {open ? 'Hide setup' : 'Setup'}
+                  </button>
+                )}
+                {a ? (
+                  <>
+                    <button className="btn sm" disabled={busyAcct === a.id} onClick={() => acctAction(a.id, () => call('accounts.check', a.id))}>
+                      {busyAcct === a.id ? 'Checking…' : 'Check'}
+                    </button>
+                    <button className="btn sm" onClick={() => setConnectP(p)}>
+                      Switch account
+                    </button>
+                    <button
+                      className="btn ghost sm danger"
+                      onClick={() => {
+                        if (confirm(`Disconnect ${p.name} (${a.name})? OneDraft signs out; your account itself is untouched.`))
+                          void acctAction(a.id, () => call('accounts.remove', a.id), `${p.name} disconnected.`)
+                      }}
+                    >
+                      Disconnect
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    className="btn primary sm"
+                    onClick={() => (miss.length ? setSetupOpen(p.id) : setConnectP(p))}
+                    title={miss.length ? `Fill in ${miss.map((s) => s.label).join(', ')} first` : ''}
+                  >
+                    Connect
+                  </button>
+                )}
+              </div>
+              {open && (
+                <div className="setup">
+                  {p.docsUrl && (
+                    <a href="#" className="small" onClick={() => call('shell.open', p.docsUrl)}>
+                      How to set up {p.name} ↗
+                    </a>
+                  )}
+                  <div style={{ marginTop: 10 }}>{fields(p.settings.map((s) => ({ ...s, key: `${p.id}.${s.key}` })))}</div>
+                  <div className="help" style={{ marginTop: 8 }}>
+                    Press Save (top right), then Connect.
+                  </div>
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      <div className="card" id="s-assistant">
         <h2>AI assistant</h2>
         <div className="stack">
           <Field spec={ENGINE_FIELD} value={value('ai.engine')} onChange={(v) => set('ai.engine', v)} />
@@ -220,8 +340,8 @@ export function Settings() {
         </div>
       </div>
 
-      <div className="card">
-        <h2>Use Polycast from Claude Code or other AI apps (MCP)</h2>
+      <div className="card" id="s-mcp">
+        <h2>Use OneDraft from Claude Code or other AI apps (MCP)</h2>
         <p className="muted small" style={{ marginTop: 0 }}>
           Starts a local MCP server so any MCP client can draft, check and schedule posts with the same tools as the built-in assistant. Publishing still waits for your OK here.
         </p>
@@ -250,32 +370,16 @@ export function Settings() {
         )}
       </div>
 
-      {app.platforms
-        .filter((p) => p.settings.length)
-        .map((p) => (
-          <div className="card" key={p.id}>
-            <h2 className="row">
-              <PlatformDot color={p.color} size={12} /> {p.name}
-              {p.docsUrl && (
-                <a href="#" className="small" style={{ fontWeight: 400 }} onClick={() => call('shell.open', p.docsUrl)}>
-                  docs ↗
-                </a>
-              )}
-            </h2>
-            {fields(p.settings.map((s) => ({ ...s, key: `${p.id}.${s.key}` })))}
-          </div>
-        ))}
-
-      <div className="card">
+      <div className="card" id="s-media">
         <h2>Public media host (for Instagram images)</h2>
         <p className="muted small" style={{ marginTop: 0 }}>
-          Instagram downloads images from a public link instead of accepting an upload. Point Polycast at any S3-compatible bucket with public read (Cloudflare R2’s free tier works). Files are deleted right after posting.
+          Instagram downloads images from a public link instead of accepting an upload. Point OneDraft at any S3-compatible bucket with public read (Cloudflare R2’s free tier works). Files are deleted right after posting.
         </p>
         {fields(HOST_FIELDS)}
       </div>
 
-      <div className="card">
-        <h2>Connectors</h2>
+      <div className="card" id="s-connectors">
+        <h2>Add another platform</h2>
         <p className="muted small" style={{ marginTop: 0 }}>
           Add any platform: drop a connector plugin into the plugins folder, or bridge an MCP server that can post (e.g. xiaohongshu-mcp). See docs/writing-a-connector.md.
         </p>
@@ -311,10 +415,23 @@ export function Settings() {
         </div>
       </div>
 
-      <div className="card">
+      <div className="card" id="s-app">
         <h2>App</h2>
         {fields(APP_FIELDS)}
       </div>
+
+      <div className="card" id="s-activity">
+        <h2>Activity</h2>
+        <div className="log" style={{ maxHeight: 360, overflow: 'auto' }}>
+          {!events?.length && <div className="muted">Nothing yet.</div>}
+          {events?.map((e) => (
+            <div key={e.id} className={`e-${e.level}`}>
+              <span className="faint">{new Date(e.ts).toLocaleString()}</span> {e.message}
+            </div>
+          ))}
+        </div>
+      </div>
+      {connectP && <ConnectDialog platform={connectP} onClose={() => setConnectP(undefined)} />}
     </div>
   )
 }

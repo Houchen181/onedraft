@@ -37,7 +37,10 @@ function ps(script: string, args: string[] = []): Promise<string> {
     p.stdout.on('data', (d) => (out += d))
     p.stderr.on('data', (d) => (err += d))
     p.on('error', reject)
+    // Speech of a long script takes a while, but never this long: a stuck PowerShell must not hang the render.
+    const timer = setTimeout(() => p.kill(), 10 * 60_000)
     p.on('close', (code) => {
+      clearTimeout(timer)
       rmSync(dir, { recursive: true, force: true })
       if (code === 0) resolve(out)
       else reject(new Error(`Speech failed: ${err.trim().slice(0, 400)}`))

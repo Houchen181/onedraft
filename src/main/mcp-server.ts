@@ -34,9 +34,13 @@ function buildServer(env: () => ToolEnv): McpServer {
 const readBody = (req: IncomingMessage) =>
   new Promise<unknown>((resolve, reject) => {
     let data = ''
-    req.on('data', (c) => {
+    req.setEncoding('utf8')
+    req.on('data', (c: string) => {
       data += c
-      if (data.length > 5_000_000) req.destroy()
+      if (data.length > 5_000_000) {
+        req.destroy()
+        reject(new Error('Request too large'))
+      }
     })
     req.on('end', () => {
       try {
@@ -66,7 +70,7 @@ export class OneDraftMcpServer {
   async start(port: number, token: string): Promise<void> {
     await this.stop()
     const expected = Buffer.from(`Bearer ${token}`)
-    this.http = createServer(async (req, res) => {
+    const http = createServer(async (req, res) => {
       const auth = Buffer.from(req.headers.authorization ?? '')
       if (auth.length !== expected.length || !timingSafeEqual(auth, expected)) {
         res.writeHead(401, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'unauthorized' }))
@@ -95,10 +99,12 @@ export class OneDraftMcpServer {
         if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json' }).end(JSON.stringify({ error: (e as Error).message }))
       }
     })
+    // Counts as running only once it is really listening (the port may be taken).
     await new Promise<void>((resolve, reject) => {
-      this.http!.once('error', reject)
-      this.http!.listen(port, '127.0.0.1', () => resolve())
+      http.once('error', reject)
+      http.listen(port, '127.0.0.1', () => resolve())
     })
+    this.http = http
   }
 
   async stop(): Promise<void> {

@@ -17,7 +17,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
-import { ContentError, type Connector } from '../core/connector'
+import { ContentError, UnconfirmedError, type Connector } from '../core/connector'
 import type { Constraints, ResolvedContent } from '../shared/types'
 import { isVideo } from './util'
 
@@ -145,11 +145,22 @@ export function makeBridge(cfg: BridgeConfig): Connector {
       return { ok: !r.isError, note: textOf(r).slice(0, 300) }
     },
 
-    async publish(_ctx, _account, { content, publishAt }) {
+    async publish(ctx, _account, { content, publishAt }) {
       const tool = content.media.some(isVideo) ? cfg.tools.publishVideo : content.media.length ? cfg.tools.publishImages : cfg.tools.publishText
       if (!tool) throw new ContentError(`${cfg.name} has no tool configured for this kind of post.`)
       const args = fillTemplate(tool.args ?? {}, vars(content, publishAt)) as Record<string, unknown>
-      const r = await withClient(cfg, (c) => c.callTool({ name: tool.name, arguments: args }, undefined, { timeout: 20 * 60_000 }))
+      let sent = false
+      let r: Awaited<ReturnType<Client['callTool']>>
+      try {
+        r = await withClient(cfg, (c) => {
+          sent = true
+          return c.callTool({ name: tool.name, arguments: args }, undefined, { timeout: 20 * 60_000, signal: ctx.signal })
+        })
+      } catch (e) {
+        // Once the call went out, the server may have posted: never let it be retried as if nothing happened.
+        if (sent) throw new UnconfirmedError(`${cfg.name} did not answer after the post was sent (${(e as Error).message}). Check before retrying.`)
+        throw e
+      }
       const text = textOf(r)
       if (r.isError) throw new Error(`${cfg.name}: ${text.slice(0, 500)}`)
       const url = /https?:\/\/\S+/.exec(text)?.[0]

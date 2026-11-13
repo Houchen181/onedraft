@@ -130,21 +130,38 @@ export async function renderComposition(
     ff.on('error', reject)
     ff.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg failed: ${ffErr.trim().split('\n').slice(-4).join('\n')}`))))
   })
+  done.catch(() => undefined) // awaited below; this only keeps an early ffmpeg exit from being an unhandled rejection
+  ff.stdin.on('error', () => undefined) // writing after ffmpeg exits is reported through `done` and write()
   const write = (buf: Buffer) =>
     new Promise<void>((resolve, reject) => {
       if (ff.stdin.destroyed) return reject(new Error(`ffmpeg stopped: ${ffErr.slice(-300)}`))
       ff.stdin.write(buf, (e) => (e ? reject(e) : resolve()))
     })
 
+  // A page that loops forever or never resolves its hooks must not hang the render: every step has a deadline,
+  // and canceling stops a step that is stuck. Destroying the window afterwards kills the stuck page.
+  const step = <T>(p: Promise<T>, ms: number, what: string) =>
+    new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`${what} took longer than ${ms / 1000} s. Check the page's script.`)), ms)
+      const onAbort = () => reject(new Error('Canceled.'))
+      signal?.addEventListener('abort', onAbort, { once: true })
+      p.then(resolve, reject).finally(() => {
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', onAbort)
+      })
+    })
+  const js = <T = unknown>(code: string, ms: number, what: string) => step(win.webContents.executeJavaScript(code) as Promise<T>, ms, what)
+
   try {
-    await win.loadFile(page)
-    await win.webContents.executeJavaScript(SEEK)
-    await win.webContents.executeJavaScript('window.__pcReady()')
+    if (signal?.aborted) throw new Error('Canceled.')
+    await step(win.loadFile(page), 30_000, 'Loading the page')
+    await js(SEEK, 10_000, 'Starting the page')
+    await js('window.__pcReady()', 30_000, 'Getting the page ready (fonts, images, onedraftReady)')
     const total = Math.round(c.durationSec * fps)
     for (let i = 0; i < total; i++) {
       if (signal?.aborted) throw new Error('Canceled.')
-      await win.webContents.executeJavaScript(`window.__pcSeek(${i / fps})`)
-      let img = await win.webContents.capturePage()
+      await js(`window.__pcSeek(${i / fps})`, 10_000, `Drawing frame ${i + 1} (onedraftSeek)`)
+      let img = await step(win.webContents.capturePage(), 10_000, `Capturing frame ${i + 1}`)
       const s = img.getSize()
       if (s.width !== W || s.height !== H) img = img.resize({ width: W, height: H })
       const bmp = img.toBitmap()

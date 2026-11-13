@@ -219,7 +219,8 @@ export const rednote: Connector = {
     let page: Page | undefined
     try {
       browser = await ctx.browser(profileKey(account), { headless: false })
-      page = browser.pages()[0] ?? (await browser.newPage())
+      // A fresh tab each time: an earlier handoff may still be open with a note waiting for the person.
+      page = browser.pages().find((p) => p.url() === 'about:blank') ?? (await browser.newPage())
       await page.goto(`${CREATOR}/publish/publish?from=homepage&target=${video ? 'video' : 'image'}`, { waitUntil: 'domcontentloaded' })
       await page.waitForTimeout(2500)
       if (!(await isLoggedIn(page, ctx))) throw new NeedsLoginError('Rednote login expired; reconnect the account.')
@@ -228,10 +229,14 @@ export const rednote: Connector = {
       // 1. media
       const tab = await maybe(page, ctx, video ? 'tabVideo' : 'tabImage', 3000)
       await tab?.click()
+      let uploaded: Promise<unknown> | undefined
       if (video) {
         await (await find(page, ctx, 'videoInput', 15_000, false)).setInputFiles(video)
         ctx.progress(0.2, 'Uploading video to Rednote')
-        await Promise.race([find(page, ctx, 'videoDone', 20 * 60_000), find(page, ctx, 'title', 20 * 60_000)])
+        // The form appears while the video is still uploading: fill it in meanwhile, publish only once it's done.
+        uploaded = find(page, ctx, 'videoDone', 20 * 60_000)
+        uploaded.catch(() => undefined)
+        await Promise.race([uploaded, find(page, ctx, 'title', 20 * 60_000)])
       } else {
         await (await find(page, ctx, 'imageInput', 15_000, false)).setInputFiles(images)
         ctx.progress(0.2, 'Uploading images to Rednote')
@@ -294,6 +299,10 @@ export const rednote: Connector = {
       }
 
       // 5. publish and confirm
+      if (uploaded) {
+        ctx.progress(0.8, 'Waiting for Rednote to finish the upload')
+        await uploaded
+      }
       await (await find(page, ctx, 'publishButton')).click()
       try {
         await page.waitForURL(/publish\/success|\/new\/note-manager/, { timeout: 60_000 })

@@ -29,7 +29,10 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'onedraft-media', privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, bypassCSP: true } }
 ])
 
-if (!app.requestSingleInstanceLock()) app.quit()
+// A second launch hands over to the running one and does nothing else: it must not run start-up work such as
+// recover(), which would mark the first instance's live uploads as interrupted.
+const primary = app.requestSingleInstanceLock()
+if (!primary) app.quit()
 app.setAppUserModelId('app.onedraft.desktop')
 
 const unpacked = (p: string) => p.replace('app.asar', 'app.asar.unpacked')
@@ -71,6 +74,10 @@ async function main() {
     return { loaded: [...p.loaded, ...b.loaded], errors: [...p.errors, ...b.errors] }
   }
   reloadExtensions()
+  const applySettings = () => {
+    for (const m of registry.manifests()) registry.get(m.id).applySettings?.((key) => settingString(store, `${m.id}.${key}`))
+  }
+  applySettings()
 
   const browsers = new BrowserManager(paths.profiles, () => settingString(store, 'rednote.browserChannel') ?? 'msedge')
   const makeContext = makeContextFactory({
@@ -109,18 +116,23 @@ async function main() {
   engine.isAiMedia = studio.isAiMedia
 
   // ---- approvals (the person confirms anything an AI wants to publish or send) ----
-  const approvals = new Map<string, (ok: boolean) => void>()
+  const approvals = new Map<string, { req: ApprovalRequest; answer: (ok: boolean) => void }>()
   const requestApproval = (req: Omit<ApprovalRequest, 'id'>) =>
     new Promise<boolean>((resolve) => {
       const id = randomUUID()
       const timer = setTimeout(() => {
         approvals.delete(id)
+        send('approval-closed', id)
         resolve(false)
       }, 30 * 60_000)
-      approvals.set(id, (ok) => {
-        clearTimeout(timer)
-        approvals.delete(id)
-        resolve(ok)
+      approvals.set(id, {
+        req: { id, ...req },
+        answer: (ok) => {
+          clearTimeout(timer)
+          approvals.delete(id)
+          send('approval-closed', id)
+          resolve(ok)
+        }
       })
       showWindow()
       send('approval', { id, ...req } satisfies ApprovalRequest)
@@ -245,10 +257,7 @@ async function main() {
     'posts.list': () => store.listPosts(),
     'posts.get': (id: string) => store.getPost(id),
     'posts.save': (d: PostDraft) => engine.savePost(d),
-    'posts.remove': (id: string) => {
-      engine.cancel(id)
-      store.removePost(id)
-    },
+    'posts.remove': (id: string) => engine.removePost(id),
     'posts.validate': (id: string) => engine.validatePost(id),
     'posts.approve': async (id: string, publishAt?: string) => {
       const p = await engine.approve(id, publishAt)
@@ -318,19 +327,21 @@ async function main() {
     'settings.set': async (entries: { key: string; value: unknown; secret?: boolean }[]) => {
       for (const e of entries) store.setSetting(e.key, e.value, !!e.secret)
       if (entries.some((e) => e.key.startsWith('mcp.'))) await syncMcp()
-      if (entries.some((e) => e.key === 'mcpBridges')) {
-        reloadExtensions()
-        send('changed', 'platforms')
-      }
+      if (entries.some((e) => e.key === 'mcpBridges')) reloadExtensions()
+      applySettings()
+      if (entries.some((e) => e.key === 'mcpBridges' || /^[\w-]+\./.test(e.key))) send('changed', 'platforms')
       return store.allSettings()
     },
     'connectors.reload': () => {
       const r = reloadExtensions()
+      applySettings()
       send('changed', 'platforms')
       return r
     },
     'agent.send': (text: string) => {
-      void agent().send(text)
+      const a = agent()
+      if (a.busy) throw new Error('Claude is still working on the last request. Wait for it, or press Stop.')
+      a.send(text).catch((e: Error) => send('agent', { type: 'error', message: e.message } satisfies AgentEvent))
     },
     'agent.stop': () => agent().stop(),
     'agent.reset': () => agent().reset(),
@@ -341,7 +352,12 @@ async function main() {
       claude: await claudeStatus(claudeCli()),
       apiKeySet: store.allSettings().secretsSet.includes('ai.apiKey')
     }),
-    'approvals.respond': (id: string, ok: boolean) => approvals.get(id)?.(ok),
+    'approvals.respond': (id: string, ok: boolean) => {
+      const a = approvals.get(id)
+      if (!a) throw new Error('That request expired or was already answered.')
+      a.answer(ok)
+    },
+    'approvals.list': () => [...approvals.values()].map((a) => a.req),
     'events.list': (limit?: number, scope?: string) => store.listEvents(limit ?? 300, scope),
     'mcp.info': () => mcpInfo(),
     'mcp.newToken': async () => {
@@ -355,7 +371,9 @@ async function main() {
     'shell.showItem': (path: string) => shell.showItemInFolder(path),
     'shell.openPath': (path: string) => shell.openPath(path)
   }
-  ipcMain.handle('call', async (_e, method: string, ...args: unknown[]) => {
+  ipcMain.handle('call', async (e, method: string, ...args: unknown[]) => {
+    // Only OneDraft's own page may call in (not a file dropped on the window, not a render window).
+    if (!isAppUrl(e.senderFrame?.url)) throw new Error('Not allowed.')
     const h = handlers[method]
     if (!h) throw new Error(`Unknown method ${method}`)
     return (h as (...a: unknown[]) => unknown)(...args)
@@ -397,6 +415,14 @@ function iconPath() {
   return candidates.find((p) => existsSync(p))
 }
 
+const rendererFile = join(__dirname, '../renderer/index.html')
+function isAppUrl(url: string | undefined): boolean {
+  if (!url) return false
+  const dev = process.env.ELECTRON_RENDERER_URL
+  if (dev) return url === dev || url.startsWith(dev.endsWith('/') ? dev : `${dev}/`) || url.startsWith(`${dev}#`) || url.startsWith(`${dev}?`)
+  return url.split(/[?#]/)[0] === pathToFileURL(rendererFile).toString()
+}
+
 function createWindow() {
   const icon = iconPath()
   win = new BrowserWindow({
@@ -414,6 +440,10 @@ function createWindow() {
     if (/^https?:\/\//.test(url)) void shell.openExternal(url)
     return { action: 'deny' }
   })
+  // Dropping a file on the window (or any link) must not replace the app with that page.
+  win.webContents.on('will-navigate', (e, url) => {
+    if (!isAppUrl(url)) e.preventDefault()
+  })
   win.on('close', (e) => {
     if (!quitting && tray) {
       e.preventDefault()
@@ -424,7 +454,7 @@ function createWindow() {
     win = null
   })
   if (process.env.ELECTRON_RENDERER_URL) void win.loadURL(process.env.ELECTRON_RENDERER_URL)
-  else void win.loadFile(join(__dirname, '../renderer/index.html'))
+  else void win.loadFile(rendererFile)
 }
 
 function showWindow() {
@@ -457,11 +487,11 @@ function createTray() {
 
 // Write a small README into the plugins folder the first time.
 const pluginReadme = join(paths.plugins, 'README.txt')
-if (!existsSync(pluginReadme)) {
+if (primary && !existsSync(pluginReadme)) {
   writeFileSync(
     pluginReadme,
     'OneDraft connector plugins\n\nEach folder here with an index.js (CommonJS) exporting `connector` adds a platform.\nSee docs/writing-a-connector.md in the OneDraft source for the interface.\nUse Settings → Connectors → Reload after adding one.\n'
   )
 }
 
-void main()
+if (primary) void main()

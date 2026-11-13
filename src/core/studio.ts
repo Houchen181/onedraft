@@ -2,7 +2,7 @@
 // Rendering of HTML compositions and speech synthesis need Electron/Windows, so they are injected.
 
 import { randomUUID } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { existsSync, rmSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import type { CompositionSpec, EditProject, EditSpec, MediaInfo } from '../shared/types'
 import { renderEdit } from './edit'
@@ -58,9 +58,11 @@ export class Studio {
 
   /** Is this file AI-generated (rendered from a composition, or an edit that used one)? */
   isAiMedia = (path: string): boolean => {
-    const full = resolve(path)
-    if (full.startsWith(resolve(this.generatedDir) + sep)) return true
-    return this.store.listProjects().some((p) => p.aiGenerated && p.output && resolve(p.output) === full)
+    // Windows paths are case-insensitive: "c:/users/..." and "C:/Users/..." are the same file.
+    const norm = (p: string) => (process.platform === 'win32' ? resolve(p).toLowerCase() : resolve(p))
+    const full = norm(path)
+    if (full.startsWith(norm(this.generatedDir) + sep)) return true
+    return this.store.listProjects().some((p) => p.aiGenerated && p.output && norm(p.output) === full)
   }
 
   saveEdit(p: { id?: string; name?: string; spec: EditSpec }): EditProject {
@@ -102,7 +104,8 @@ export class Studio {
     if (this.running.has(id)) throw new Error('Already rendering.')
     const ac = new AbortController()
     this.running.set(id, ac)
-    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
+    // Unique per render: two renders in the same second (or of two projects with one name) never share a file.
+    const stamp = `${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}-${randomUUID().slice(0, 6)}`
     const work = join(this.editsDir, '.work', `${id}-${randomUUID().slice(0, 8)}`)
     try {
       let info: MediaInfo
@@ -127,10 +130,12 @@ export class Studio {
         info = await this.platform.renderComposition(c, out, work, narration, (f) => this.onProgress(id, f, 'Rendering frames'), ac.signal)
       }
       this.onProgress(id, 1, 'Done')
-      const project = this.store.saveProject({ ...p, output: info.path })
+      // Only record the output: the project may have been edited (or deleted) while it rendered.
+      const project = this.store.setProjectOutput(id, info.path) ?? { ...p, output: info.path }
       return { project, info }
     } finally {
       this.running.delete(id)
+      rmSync(work, { recursive: true, force: true })
     }
   }
 

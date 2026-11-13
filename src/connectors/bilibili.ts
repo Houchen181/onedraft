@@ -195,9 +195,10 @@ export const bilibili: Connector = {
     const exe = biliupPath(ctx)
     if (!exe) throw new Error('biliup is not installed; reconnect the account to install it.')
     const o = content.options
-    const args = ['-u', cookiePath(account), 'upload', content.media[0], '--title', content.title, '--desc', content.caption, '--tag', content.tags.map((t) => t.replace(/,/g, ' ')).join(','), '--tid', String(o.tid ?? '21'), '--copyright', String(o.copyright ?? '1')]
-    if (o.copyright === '2' && o.source) args.push('--source', String(o.source))
-    if (o.dynamic) args.push('--dynamic', String(o.dynamic))
+    // --opt=value so text starting with "-" (a bulleted description) is not read as another option.
+    const args = ['-u', cookiePath(account), 'upload', content.media[0], `--title=${content.title}`, `--desc=${content.caption}`, `--tag=${content.tags.map((t) => t.replace(/,/g, ' ')).join(',')}`, '--tid', String(o.tid ?? '21'), '--copyright', String(o.copyright ?? '1')]
+    if (o.copyright === '2' && o.source) args.push(`--source=${String(o.source)}`)
+    if (o.dynamic) args.push(`--dynamic=${String(o.dynamic)}`)
     if (content.cover) args.push('--cover', content.cover)
     if (o.line && o.line !== 'auto') args.push('-l', String(o.line))
     if (publishAt) args.push('--dtime', String(Math.floor(new Date(publishAt).getTime() / 1000)))
@@ -227,8 +228,9 @@ export const bilibili: Connector = {
     }
     const tail = lastLines.join('\n').slice(-600)
     const code = /code:\s*(-?\d+)/.exec(out)?.[1]
-    if (/601|上传过快/.test(out)) throw new RetryableError('Bilibili says uploads are too frequent (601).', 1800)
-    if (/-101|账号未登录|未登录/.test(out)) throw new NeedsLoginError('Bilibili login expired.')
+    // Match Bilibili's codes, not any "601" in byte counts or timestamps: a wrong "retry" could post twice.
+    if (code === '601' || /上传过快/.test(out)) throw new RetryableError('Bilibili says uploads are too frequent (601).', 1800)
+    if (code === '-101' || /账号未登录|未登录/.test(out)) throw new NeedsLoginError('Bilibili login expired.')
     if (code && code !== '0') throw new ContentError(`Bilibili rejected the submission (code ${code}): ${tail}`)
     if (submitStarted) throw new UnconfirmedError(`biliup stopped while submitting; check your Bilibili uploads. ${tail}`, bvid)
     throw new Error(`biliup failed (exit ${r.code}): ${tail}`)

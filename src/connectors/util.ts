@@ -74,3 +74,16 @@ export function splitThread(text: string, max: number, measure: (s: string) => n
   if (current) parts.push(current)
   return parts.map((p, i) => `${p} ${i + 1}/${parts.length}`)
 }
+
+const refreshing = new Map<string, Promise<string>>()
+/**
+ * Run one token refresh at a time per refresh token. X and TikTok rotate refresh tokens, so two refreshes racing
+ * (a publish, the background login check, the assistant reading comments) would make the loser look logged out.
+ */
+export function singleFlight(key: string, fn: () => Promise<string>): Promise<string> {
+  const running = refreshing.get(key)
+  if (running) return running
+  const p = fn().finally(() => refreshing.delete(key))
+  refreshing.set(key, p)
+  return p
+}

@@ -79,8 +79,7 @@ export function makeContextFactory(deps: {
           let stderr = ''
           let buf = ''
           const t = opts.timeoutMs ? setTimeout(() => p.kill(), opts.timeoutMs) : undefined
-          const onData = (d: Buffer, which: 'out' | 'err') => {
-            const s = d.toString('utf8')
+          const onData = (s: string, which: 'out' | 'err') => {
             if (which === 'out') stdout = (stdout + s).slice(-200_000)
             else stderr = (stderr + s).slice(-200_000)
             buf += s
@@ -88,8 +87,11 @@ export function makeContextFactory(deps: {
             buf = lines.pop() ?? ''
             for (const l of lines) if (l.trim()) opts.onLine?.(l)
           }
-          p.stdout.on('data', (d: Buffer) => onData(d, 'out'))
-          p.stderr.on('data', (d: Buffer) => onData(d, 'err'))
+          // Decode as a stream so a character split across two chunks is not garbled.
+          p.stdout.setEncoding('utf8')
+          p.stderr.setEncoding('utf8')
+          p.stdout.on('data', (d: string) => onData(d, 'out'))
+          p.stderr.on('data', (d: string) => onData(d, 'err'))
           p.on('error', reject)
           p.on('close', (code) => {
             if (t) clearTimeout(t)

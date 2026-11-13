@@ -2,12 +2,13 @@
 // so anything an agent can do here, Claude Code / Claude Desktop / other MCP clients can do too.
 // Tools that act on the outside world (publishing, replying) ask the user in the app first.
 
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { z } from 'zod'
 import { detectScenes, detectSilences, evenTimes, extractFrames, speechSegments } from './edit'
 import type { Engine } from './engine'
 import { coverFrame, fit, probe } from './media'
 import type { Studio } from './studio'
+import type { Post, Target } from '../shared/types'
 import { resolveContent } from './validate'
 
 /** Images a tool wants the model to see. Put them under this key in the result. */
@@ -53,6 +54,42 @@ const variantShape = {
   media: z.array(z.string()).optional().describe('Absolute file paths that replace the post media for this platform, e.g. a 9:16 rendition'),
   cover: z.string().optional().describe('Absolute path of a cover image'),
   options: z.record(z.string(), z.unknown()).optional().describe('Platform options, keys from get_platform_rules')
+}
+
+/**
+ * Tools may only change what the person has not approved yet. Once a post is queued, scheduled or publishing,
+ * changing it would publish something they never saw: cancel it, edit, and approve again.
+ */
+function mustBeEditable(engine: Engine, postId: string, targetId?: string) {
+  const p = engine.mustPost(postId)
+  const approved = p.targets.filter((t) => (!targetId || t.id === targetId) && ['queued', 'publishing', 'scheduled'].includes(t.status))
+  if (approved.length)
+    throw new Error(
+      `This post was already approved (${approved.map((t) => `${t.platform}: ${t.status}`).join(', ')}). Cancel it with cancel_post, change it, then ask for approval again.`
+    )
+}
+
+/** Everything that decides what gets published, so an approval can be tied to exactly that. */
+function contentFingerprint(engine: Engine, postId: string): string {
+  const p = engine.mustPost(postId)
+  return JSON.stringify([p.title, p.body, p.tags, p.media, p.aiGenerated, p.targets.map((t) => [t.id, t.status, t.variant])])
+}
+
+/** One platform's version as the person will see it in the approval card. */
+function describeTarget(engine: Engine, post: Post, t: Target): string {
+  const c = resolveContent(post, t)
+  const name = engine.registry.has(t.platform) ? engine.connector(t.platform).manifest.name : t.platform
+  const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s)
+  return [
+    `${name}:`,
+    c.title ? `Title: ${clip(c.title, 120)}` : undefined,
+    c.caption ? clip(c.caption, 400) : '(no text)',
+    c.tags.length ? `Tags: ${c.tags.map((x) => `#${x}`).join(' ')}` : undefined,
+    c.media.length ? `Media: ${c.media.map((m) => basename(m)).join(', ')}` : undefined,
+    post.aiGenerated ? 'Labelled AI-generated' : undefined
+  ]
+    .filter(Boolean)
+    .join('\n')
 }
 
 function summarizePost(engine: Engine, id: string) {
@@ -178,6 +215,7 @@ export const TOOLS: ToolDef[] = [
       scheduledAt: z.string().optional()
     }),
     async run({ postId, ...patch }, { engine }) {
+      mustBeEditable(engine, postId)
       const p = engine.mustPost(postId)
       engine.savePost({
         id: p.id,
@@ -197,6 +235,9 @@ export const TOOLS: ToolDef[] = [
     description: "Set one account's platform-specific version of a post (title, caption, tags, media, cover, options). Fields you omit are kept.",
     schema: z.object({ targetId: z.string(), ...variantShape }),
     async run({ targetId, ...patch }, { engine }) {
+      const before = engine.store.getTarget(targetId)
+      if (!before) throw new Error(`Unknown target ${targetId}`)
+      mustBeEditable(engine, before.postId, targetId)
       const t = engine.updateVariant(targetId, patch)
       const post = engine.mustPost(t.postId)
       return { target: t, resolved: resolveContent(post, t), issues: await engine.validateTarget(post, t) }
@@ -402,20 +443,32 @@ Pass projectId to change an existing generated video. Rendering takes about 2 s 
     name: 'approve_post',
     description:
       'Approve a post for publishing (now, or at publishAt). The person must confirm in OneDraft unless they turned on auto-approve. Validate first.',
-    schema: z.object({ postId: z.string(), publishAt: z.string().optional().describe('ISO 8601; omit to publish now') }),
+    schema: z.object({ postId: z.string(), publishAt: z.string().optional().describe("ISO 8601; omit to use the post's scheduledAt, or publish now if it has none") }),
     async run({ postId, publishAt }, env) {
-      const s = summarizePost(env.engine, postId)
+      const { engine } = env
+      const post = engine.mustPost(postId)
+      // The post's own time counts when no other is given (create_post documents scheduledAt as the publish time).
+      const future = post.scheduledAt && new Date(post.scheduledAt).getTime() > Date.now() ? post.scheduledAt : undefined
+      const when = publishAt ?? future
+      if (when && Number.isNaN(new Date(when).getTime())) throw new Error(`Bad publish time "${when}"`)
+      const pending = post.targets.filter((t) => t.status === 'draft' || t.status === 'canceled')
+      if (!pending.length) throw new Error('Nothing to approve: every platform on this post was already approved or sent.')
       if (!env.autoApprove()) {
+        // Show exactly what each platform gets, and approve only that: if the post changes while the card is open,
+        // the approval no longer applies.
+        const fingerprint = contentFingerprint(engine, postId)
         const ok = await env.requestApproval({
-          title: publishAt ? `Schedule post for ${new Date(publishAt).toLocaleString()}?` : 'Publish this post now?',
-          detail: `${s.title || s.body.slice(0, 80)}\n→ ${s.targets.map((t) => `${t.platform} (${t.account})`).join(', ')}`,
+          title: when ? `Schedule this post for ${new Date(when).toLocaleString()}?` : 'Publish this post now?',
+          detail: pending.map((t) => describeTarget(engine, post, t)).join('\n\n'),
           source: env.source
         })
         if (!ok) return { approved: false, message: 'The person declined. Ask what to change.' }
+        if (contentFingerprint(engine, postId) !== fingerprint)
+          return { approved: false, message: 'The post changed while the person was looking at it, so the approval does not apply. Ask again.' }
       }
-      const p = await env.engine.approve(postId, publishAt)
-      env.engine.tick()
-      return { approved: true, status: p.status }
+      const p = await engine.approve(postId, when)
+      engine.tick()
+      return { approved: true, status: p.status, publishAt: when ?? 'now' }
     }
   }),
   def({
@@ -423,7 +476,14 @@ Pass projectId to change an existing generated video. Rendering takes about 2 s 
     description: 'Cancel queued targets of a post (already published ones are not removed from platforms).',
     schema: z.object({ postId: z.string() }),
     async run({ postId }, { engine }) {
-      return { status: engine.cancel(postId).status }
+      const p = engine.cancel(postId)
+      const held = engine.heldByPlatform(p)
+      return {
+        status: p.status,
+        ...(held.length
+          ? { note: `Already scheduled on ${held.map((t) => t.platform).join(', ')} itself; OneDraft cannot take those back. Remove them on the platform.` }
+          : {})
+      }
     }
   }),
   def({

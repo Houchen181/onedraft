@@ -63,13 +63,33 @@ export function PostEditor({ postId: initialId, seedMedia, onCreated }: { postId
   const dirty = useRef(false)
   const lastSaved = useRef<string | undefined>(undefined)
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  // Latest values for async work (saves, conversions, file pickers) so it never acts on an old render's copy.
+  const idRef = useRef<string | undefined>(initialId)
+  const mRef = useRef<Main>(EMPTY)
+  const varsRef = useRef<Record<string, Variant>>({})
+  /** Bumped on every edit here; a save only marks the editor clean if nothing changed while it ran. */
+  const edits = useRef(0)
+  /** What was edited here since the last save, so changes Claude made meanwhile to the rest are kept. */
+  const touched = useRef<{ main: boolean; accounts: Set<string> }>({ main: false, accounts: new Set() })
+  const saveChain = useRef<Promise<Post | undefined>>(Promise.resolve(undefined))
+  const deleted = useRef(false)
+  const setMainState = (next: Main) => {
+    mRef.current = next
+    setM(next)
+  }
+  const setVarsState = (next: Record<string, Variant>) => {
+    varsRef.current = next
+    setVariants(next)
+  }
+  const mainOf = (p: Post): Main => ({ title: p.title, body: p.body, tags: p.tags, media: p.media, aiGenerated: p.aiGenerated, scheduledAt: toLocalInput(p.scheduledAt) })
+  const varsOf = (p: Post) => Object.fromEntries(p.targets.filter((t) => t.status !== 'canceled').map((t) => [t.accountId, t.variant]))
 
   // ---------- load ----------
   const applyPost = (p: Post) => {
     setPost(p)
     lastSaved.current = p.updatedAt
-    setM({ title: p.title, body: p.body, tags: p.tags, media: p.media, aiGenerated: p.aiGenerated, scheduledAt: toLocalInput(p.scheduledAt) })
-    setVariants(Object.fromEntries(p.targets.filter((t) => t.status !== 'canceled').map((t) => [t.accountId, t.variant])))
+    setMainState(mainOf(p))
+    setVarsState(varsOf(p))
   }
   async function validate(p: Post) {
     const byTarget = await call<Record<string, Issue[]>>('posts.validate', p.id)
@@ -88,9 +108,11 @@ export function PostEditor({ postId: initialId, seedMedia, onCreated }: { postId
     if (initialId) void load(initialId)
     else {
       // A new post goes to every connected platform by default.
-      setVariants(Object.fromEntries(app.accounts.filter((a) => a.status !== 'error').map((a) => [a.id, {}])))
+      setVarsState(Object.fromEntries(app.accounts.filter((a) => a.status !== 'error').map((a) => [a.id, {}])))
       if (seedMedia?.length)
-        void Promise.all(seedMedia.map((p) => call<boolean>('media.isAi', p))).then((ai) => setM({ ...EMPTY, media: seedMedia, aiGenerated: ai.some(Boolean) }))
+        void Promise.all(seedMedia.map((p) => call<boolean>('media.isAi', p))).then((ai) =>
+          setMainState({ ...mRef.current, media: [...new Set([...seedMedia, ...mRef.current.media])], aiGenerated: mRef.current.aiGenerated || ai.some(Boolean) })
+        )
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialId])
@@ -99,9 +121,10 @@ export function PostEditor({ postId: initialId, seedMedia, onCreated }: { postId
   useEffect(
     () =>
       on('changed', async (k) => {
-        if (k !== 'posts' || !postId || dirty.current) return
-        const p = await call<Post | undefined>('posts.get', postId)
-        if (p && p.updatedAt !== lastSaved.current) {
+        const id = idRef.current
+        if (k !== 'posts' || !id || dirty.current || deleted.current) return
+        const p = await call<Post | undefined>('posts.get', id)
+        if (p && p.updatedAt !== lastSaved.current && !dirty.current) {
           applyPost(p)
           await validate(p)
         }
@@ -129,49 +152,107 @@ export function PostEditor({ postId: initialId, seedMedia, onCreated }: { postId
   }, [allMedia.join('|')])
 
   // ---------- save ----------
-  const save = async (main = m, vars = variants): Promise<Post | undefined> => {
-    const draft: PostDraft = {
-      id: postId,
-      title: main.title,
-      body: main.body,
-      tags: main.tags,
-      media: main.media,
-      aiGenerated: main.aiGenerated,
-      scheduledAt: main.scheduledAt ? new Date(main.scheduledAt).toISOString() : undefined,
-      targets: Object.entries(vars).map(([accountId, variant]) => ({ accountId, variant }))
+  const saveNow = async (): Promise<Post | undefined> => {
+    if (deleted.current) return undefined
+    const seq = edits.current
+    const id = idRef.current
+    const t = touched.current
+    touched.current = { main: false, accounts: new Set() }
+    let main = mRef.current
+    let vars = varsRef.current
+    try {
+      // Claude (or another window) may have changed the post since it was loaded here: keep their changes for
+      // everything not edited here, instead of writing this editor's older copy over them.
+      if (id) {
+        const server = await call<Post | undefined>('posts.get', id)
+        if (server && server.updatedAt !== lastSaved.current) {
+          if (!t.main) main = mainOf(server)
+          const merged: Record<string, Variant> = varsOf(server)
+          for (const a of t.accounts) {
+            if (a in vars) merged[a] = vars[a]
+            else delete merged[a]
+          }
+          vars = merged
+        }
+      }
+      const draft: PostDraft = {
+        id,
+        title: main.title,
+        body: main.body,
+        tags: main.tags,
+        media: main.media,
+        aiGenerated: main.aiGenerated,
+        scheduledAt: main.scheduledAt ? new Date(main.scheduledAt).toISOString() : undefined,
+        targets: Object.entries(vars).map(([accountId, variant]) => ({ accountId, variant }))
+      }
+      setSaving('saving')
+      const p = await call<Post>('posts.save', draft)
+      lastSaved.current = p.updatedAt
+      if (!idRef.current) {
+        idRef.current = p.id
+        setPostId(p.id)
+        onCreated(p.id)
+      }
+      setPost(p)
+      // Nothing typed while saving: show the saved post (including anything merged in from Claude).
+      if (edits.current === seq) {
+        dirty.current = false
+        applyPost(p)
+      }
+      setSaving('saved')
+      await validate(p)
+      return p
+    } catch (e) {
+      // Not saved: remember what was edited so the next try still sends it.
+      touched.current.main ||= t.main
+      for (const a of t.accounts) touched.current.accounts.add(a)
+      setSaving('idle')
+      throw e
     }
-    setSaving('saving')
-    const p = await call<Post>('posts.save', draft)
-    lastSaved.current = p.updatedAt
-    dirty.current = false
-    setPost(p)
-    setSaving('saved')
-    if (!postId) {
-      setPostId(p.id)
-      onCreated(p.id)
-    }
-    await validate(p)
-    return p
   }
-  const schedule = (main: Main, vars: Record<string, Variant>) => {
+  /** Saves run one at a time, in order, each with the latest values. */
+  const save = (): Promise<Post | undefined> => {
+    const next = saveChain.current.catch(() => undefined).then(saveNow)
+    saveChain.current = next
+    return next
+  }
+  const schedule = () => {
     dirty.current = true
+    edits.current++
     clearTimeout(timer.current)
-    timer.current = setTimeout(() => void save(main, vars).catch((e: Error) => app.toast(e.message, true)), 600)
+    timer.current = setTimeout(() => {
+      timer.current = undefined
+      void save().catch((e: Error) => app.toast(e.message, true))
+    }, 600)
   }
-  const setMain = (patch: Partial<Main>) => {
-    const next = { ...m, ...patch }
-    setM(next)
-    schedule(next, variants)
+  // Leaving the editor with a save still waiting: send it now rather than lose the last edits.
+  useEffect(
+    () => () => {
+      if (timer.current && !deleted.current) {
+        clearTimeout(timer.current)
+        void save().catch(() => undefined)
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  )
+  const setMain = (patch: Partial<Main> | ((cur: Main) => Partial<Main>)) => {
+    const cur = mRef.current
+    setMainState({ ...cur, ...(typeof patch === 'function' ? patch(cur) : patch) })
+    touched.current.main = true
+    schedule()
   }
   const setVariant = (accountId: string, patch: Partial<Variant> | undefined) => {
-    const next = { ...variants }
+    const next = { ...varsRef.current }
     if (patch === undefined) delete next[accountId]
     else next[accountId] = { ...(next[accountId] ?? {}), ...patch }
-    setVariants(next)
-    schedule(m, next)
+    setVarsState(next)
+    touched.current.accounts.add(accountId)
+    schedule()
   }
   const ensureSaved = async () => {
     clearTimeout(timer.current)
+    timer.current = undefined
     return save()
   }
 
@@ -185,7 +266,7 @@ export function PostEditor({ postId: initialId, seedMedia, onCreated }: { postId
     try {
       const p = await ensureSaved()
       if (!p) return
-      const when = m.scheduledAt ? new Date(m.scheduledAt).toISOString() : undefined
+      const when = mRef.current.scheduledAt ? new Date(mRef.current.scheduledAt).toISOString() : undefined
       await call('posts.approve', p.id, when)
       app.toast(when ? 'Scheduled.' : 'Publishing now.')
       await load(p.id)
@@ -196,13 +277,25 @@ export function PostEditor({ postId: initialId, seedMedia, onCreated }: { postId
     }
   }
   const remove = async () => {
-    if (!postId) return app.go('posts')
+    const id = idRef.current
     if (!confirm('Delete this post from OneDraft? Anything already published stays on the platforms.')) return
-    await call('posts.remove', postId)
-    app.go('posts')
+    // Stop any waiting save first, or it would bring the post back right after it is deleted.
+    clearTimeout(timer.current)
+    timer.current = undefined
+    deleted.current = true
+    await saveChain.current.catch(() => undefined)
+    const saved = idRef.current ?? id
+    if (!saved) return app.go('posts')
+    try {
+      await call('posts.remove', saved)
+      app.go('posts')
+    } catch (e) {
+      deleted.current = false
+      app.toast((e as Error).message, true)
+    }
   }
   const fitFor = async (accountId: string, aspect: string, mode: string) => {
-    const source = variants[accountId]?.media ?? m.media
+    const source = varsRef.current[accountId]?.media ?? mRef.current.media
     if (!source.length) return
     setBusy(`Making a ${aspect} version…`)
     try {
@@ -431,7 +524,7 @@ function MediaGrid({ paths, infos, onRemove, onEdit, onAdd }: { paths: string[];
 
 function MainPanel(props: {
   m: Main
-  setMain: (p: Partial<Main>) => void
+  setMain: (p: Partial<Main> | ((cur: Main) => Partial<Main>)) => void
   infos: Record<string, MediaInfo>
   posting: number
   aiForced: boolean
@@ -470,11 +563,11 @@ function MainPanel(props: {
           <MediaGrid
             paths={m.media}
             infos={props.infos}
-            onRemove={(p) => setMain({ media: m.media.filter((x) => x !== p) })}
+            onRemove={(p) => setMain((cur) => ({ media: cur.media.filter((x) => x !== p) }))}
             onEdit={(p) => app.openStudio(p)}
             onAdd={async () => {
               const files = await call<string[]>('media.pick')
-              if (files.length) setMain({ media: [...m.media, ...files.filter((f) => !m.media.includes(f))] })
+              if (files.length) setMain((cur) => ({ media: [...cur.media, ...files.filter((f) => !cur.media.includes(f))] }))
             }}
           />
         </div>

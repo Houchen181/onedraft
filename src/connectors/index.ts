@@ -2,7 +2,7 @@
 
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import type { Connector } from '../core/connector'
 import type { Registry } from '../core/registry'
 import { bilibili } from './bilibili'
@@ -29,14 +29,19 @@ export function loadPlugins(registry: Registry, dir: string): { loaded: string[]
   const errors: string[] = []
   if (!existsSync(dir)) return { loaded, errors }
   for (const name of readdirSync(dir)) {
-    const entry = join(dir, name, 'index.js')
-    if (!statSync(join(dir, name)).isDirectory() || !existsSync(entry)) continue
+    const folder = join(dir, name)
+    const entry = join(folder, 'index.js')
     try {
+      if (!statSync(folder).isDirectory() || !existsSync(entry)) continue
       const req = createRequire(entry)
-      delete req.cache[req.resolve(entry)]
+      // Forget every module of this plugin so a reload picks up edits to its helper files too.
+      for (const key of Object.keys(req.cache)) if (key.startsWith(folder + sep)) delete req.cache[key]
       const mod = req(entry) as { connector?: unknown; default?: unknown }
       const c = mod.connector ?? mod.default
       if (!looksLikeConnector(c)) throw new Error('index.js must export `connector` with manifest, connect() and publish().')
+      // A plugin may not take over a built-in platform (it would receive that platform's logins).
+      if (BUILTINS.some((b) => b.manifest.id === c.manifest.id)) throw new Error(`id "${c.manifest.id}" is taken by a built-in connector`)
+      if (registry.has(c.manifest.id)) throw new Error(`id "${c.manifest.id}" is already used by another plugin`)
       c.manifest.source = 'plugin'
       c.manifest.kind = c.manifest.kind ?? 'plugin'
       registry.register(c)
@@ -61,11 +66,13 @@ export function loadBridges(registry: Registry, json: string | undefined): { loa
   }
   for (const cfg of list) {
     try {
+      if (!cfg || typeof cfg !== 'object' || !cfg.id) throw new Error('each bridge needs an "id"')
       if (BUILTINS.some((b) => b.manifest.id === cfg.id)) throw new Error(`id "${cfg.id}" is taken by a built-in connector`)
+      if (registry.has(cfg.id)) throw new Error(`id "${cfg.id}" is already used by a plugin or another bridge`)
       registry.register(makeBridge(cfg))
       loaded.push(cfg.id)
     } catch (e) {
-      errors.push(`${cfg.id ?? '?'}: ${(e as Error).message}`)
+      errors.push(`${cfg?.id ?? '?'}: ${(e as Error).message}`)
     }
   }
   return { loaded, errors }

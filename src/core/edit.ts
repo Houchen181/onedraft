@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { basename, extname, join, relative, isAbsolute, parse as parsePath } from 'node:path'
 import type { Caption, EditSpec, MediaInfo } from '../shared/types'
-import { frameFor, probe, type MediaTools } from './media'
+import { frameFor, hasAudioStream, probe, type MediaTools } from './media'
 import { nameAspect, parseAspect } from './validate'
 
 export const FONT_CANDIDATES = [
@@ -88,10 +88,43 @@ function atempo(speed: number): string {
   return parts.length ? `${parts.join(',')},` : ''
 }
 
-const hexColor = (c?: string, fallback = 'white') => {
+const COLOR_NAMES = new Set(
+  'white black red green blue yellow orange purple pink cyan magenta gray grey silver gold navy teal lime maroon olive brown violet indigo coral salmon beige ivory'.split(' ')
+)
+/** A color drawtext understands: #rrggbb, #rgb or a common name; anything else falls back. */
+export const hexColor = (c?: string, fallback = 'white') => {
   if (!c) return fallback
-  const m = /^#?([0-9a-f]{6})$/i.exec(c.trim())
-  return m ? `0x${m[1]}` : c.replace(/[^a-z0-9@.]/gi, '') || fallback
+  const v = c.trim().toLowerCase()
+  const six = /^#?([0-9a-f]{6})$/.exec(v)
+  if (six) return `0x${six[1]}`
+  const three = /^#?([0-9a-f])([0-9a-f])([0-9a-f])$/.exec(v)
+  if (three) return `0x${three[1]}${three[1]}${three[2]}${three[2]}${three[3]}${three[3]}`
+  return COLOR_NAMES.has(v) ? v : fallback
+}
+
+const finite = (x: number | undefined, fallback: number) => (typeof x === 'number' && Number.isFinite(x) ? x : fallback)
+
+/** Clamp a spec to values ffmpeg can render, whoever wrote it (the Studio UI, the assistant, a hand-edited project). */
+export function saneSpec(spec: EditSpec): EditSpec {
+  const fps = finite(spec.fps, 30)
+  const ratio = spec.aspect ? parseAspect(spec.aspect) : NaN
+  return {
+    ...spec,
+    fps: fps >= 1 ? Math.min(fps, 120) : 30,
+    longSide: Math.round(clamp(finite(spec.longSide, 1920), 64, 4096)),
+    aspect: Number.isFinite(ratio) && ratio >= 0.2 && ratio <= 5 ? spec.aspect : undefined,
+    transitionSec: Math.max(0, finite(spec.transitionSec, 0)),
+    fadeInSec: Math.max(0, finite(spec.fadeInSec, 0)),
+    fadeOutSec: Math.max(0, finite(spec.fadeOutSec, 0)),
+    clips: spec.clips.map((c) => ({
+      ...c,
+      in: c.in === undefined ? undefined : Math.max(0, finite(c.in, 0)),
+      durationSec: c.durationSec === undefined ? undefined : clamp(finite(c.durationSec, 3), 0.1, 3600),
+      volume: c.volume === undefined ? undefined : clamp(finite(c.volume, 1), 0, 10)
+    })),
+    texts: spec.texts?.map((t) => ({ ...t, size: t.size === undefined ? undefined : clamp(finite(t.size, 0.045), 0.01, 0.3) })),
+    music: spec.music && { ...spec.music, volume: spec.music.volume === undefined ? undefined : clamp(finite(spec.music.volume, 0.25), 0, 4) }
+  }
 }
 
 export interface BuiltEdit {
@@ -109,10 +142,11 @@ export interface BuiltEdit {
  * `fontRef` is the font path as ffmpeg should see it (relative to the work dir, to avoid escaping drive colons).
  */
 export function buildEdit(
-  spec: EditSpec,
+  rawSpec: EditSpec,
   infos: MediaInfo[],
   o: { out: string; fontRef: string; graphFile?: string }
 ): BuiltEdit {
+  const spec = saneSpec(rawSpec)
   const fps = spec.fps ?? 30
   const first = infos.find((i) => i.width && i.height)
   const aspect = spec.aspect ?? (first ? nameAspect(first.width! / first.height!) : '16:9')
@@ -293,7 +327,10 @@ export async function renderEdit(
   for (const c of spec.clips) infos.push(await probe(tools, c.src))
   const problems = checkSpec(spec, infos)
   if (problems.length) throw new Error(problems.join(' '))
-  if (spec.music?.src && !existsSync(spec.music.src)) throw new Error(`Music file not found: ${spec.music.src}`)
+  if (spec.music?.src) {
+    if (!existsSync(spec.music.src)) throw new Error(`Music file not found: ${spec.music.src}`)
+    if (!(await hasAudioStream(tools, spec.music.src))) throw new Error(`The music file has no sound: ${basename(spec.music.src)}`)
+  }
   if (spec.logo?.src && !existsSync(spec.logo.src)) throw new Error(`Logo file not found: ${spec.logo.src}`)
   const font = defaultFont()
   const needsFont = (spec.texts?.length ?? 0) + (spec.captions?.length ?? 0) > 0

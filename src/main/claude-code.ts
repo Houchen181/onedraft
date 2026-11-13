@@ -95,8 +95,10 @@ export class ClaudeCodeAgent {
     return this.items
   }
 
+  private running = false
+
   get busy() {
-    return !!this.proc
+    return this.running
   }
 
   stop() {
@@ -124,7 +126,10 @@ export class ClaudeCodeAgent {
   }
 
   async send(text: string): Promise<void> {
-    if (this.proc) throw new Error('The assistant is still working; wait or press Stop.')
+    if (this.running) throw new Error('The assistant is still working; wait or press Stop.')
+    // Busy from the first moment, so a second message or Stop during start-up is handled.
+    this.running = true
+    this.stopped = false
     const cli = this.deps.cli()
     this.add({ kind: 'user', text })
     this.deps.emit({ type: 'busy', busy: true })
@@ -138,6 +143,7 @@ export class ClaudeCodeAgent {
       this.deps.emit({ type: 'error', message })
     } finally {
       this.proc = undefined
+      this.running = false
       this.resave()
       this.deps.emit({ type: 'busy', busy: false })
       this.deps.emit({ type: 'items', items: this.items })
@@ -168,9 +174,11 @@ export class ClaudeCodeAgent {
     const model = this.deps.model()
     if (model) args.push('--model', model)
 
-    this.stopped = false
+    if (this.stopped) throw new Error('Stopped.')
     const proc = spawn(cli, args, { cwd: this.deps.workDir, env: childEnv(), windowsHide: true })
     this.proc = proc
+    proc.stdout.setEncoding('utf8')
+    proc.stderr.setEncoding('utf8')
     proc.stdin.end(text, 'utf8')
 
     const tools = new Map<string, Extract<AgentItem, { kind: 'tool' }>>()
@@ -224,8 +232,8 @@ export class ClaudeCodeAgent {
       if (ev.type === 'result') result = ev
     }
 
-    proc.stdout.on('data', (d: Buffer) => {
-      buf += d.toString('utf8')
+    proc.stdout.on('data', (d: string) => {
+      buf += d
       const lines = buf.split('\n')
       buf = lines.pop() ?? ''
       for (const line of lines) {

@@ -4,7 +4,7 @@ import { NeedsLoginError, RetryableError, UnconfirmedError, type Connector, type
 import { check, expiresSoon, form, getJson, sleep, type OAuthTokens } from '../core/http'
 import { weightedLength } from '../core/validate'
 import type { Comment } from '../shared/types'
-import { fileSize, isVideo, mimeOf, readChunk, requireSetting, splitThread } from './util'
+import { fileSize, isVideo, mimeOf, readChunk, requireSetting, singleFlight, splitThread } from './util'
 
 const API = 'https://api.x.com/2'
 const SEGMENT = 4 * 1024 * 1024
@@ -14,10 +14,12 @@ async function accessToken(ctx: ConnectorContext): Promise<string> {
   if (!t?.accessToken) throw new NeedsLoginError()
   if (!expiresSoon(t)) return t.accessToken
   if (!t.refreshToken) throw new NeedsLoginError()
+  const refreshToken = t.refreshToken
+  return singleFlight(`x:${refreshToken}`, async () => {
   const res = await ctx.fetch(`${API}/oauth2/token`, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: form({ grant_type: 'refresh_token', refresh_token: t.refreshToken, client_id: requireSetting(ctx.setting, 'clientId', 'the X client ID') })
+    body: form({ grant_type: 'refresh_token', refresh_token: refreshToken, client_id: requireSetting(ctx.setting, 'clientId', 'the X client ID') })
   })
   if (res.status === 400 || res.status === 401) throw new NeedsLoginError('X refused the saved login; reconnect.')
   const j = (await (await check(res, 'Refresh X token')).json()) as { access_token: string; refresh_token?: string; expires_in: number }
@@ -29,6 +31,7 @@ async function accessToken(ctx: ConnectorContext): Promise<string> {
   }
   ctx.secrets.set(next)
   return next.accessToken
+  })
 }
 
 async function api<T>(ctx: ConnectorContext, path: string, init: RequestInit = {}): Promise<T> {
@@ -167,6 +170,12 @@ export const x: Connector = {
     return { ok: true, name: me.data.name }
   },
 
+  applySettings(setting) {
+    // Premium accounts can post up to 25,000 characters, so long text needn't become a thread.
+    const premium = setting('premium') === 'true'
+    this.manifest.constraints.caption = { max: premium ? 25000 : 280, unit: 'weighted', overflow: 'thread' }
+  },
+
   async publish(ctx, account, { content }) {
     const max = ctx.setting('premium') === 'true' ? 25000 : 280
     const hashtags = content.tags.map((t) => `#${t.replace(/^#|\s+/g, '')}`).filter((t) => t.length > 1 && !content.caption.includes(t))
@@ -185,11 +194,22 @@ export const x: Connector = {
       if (previous) payload.reply = { in_reply_to_tweet_id: previous }
       if (content.aiGenerated) payload.made_with_ai = true
       try {
-        const r = await api<{ data: { id: string } }>(ctx, '/tweets', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(payload)
-        })
+        const token = await accessToken(ctx)
+        let res: Response
+        try {
+          res = await ctx.fetch(`${API}/tweets`, {
+            method: 'POST',
+            headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+            body: JSON.stringify(payload),
+            signal: ctx.signal
+          })
+        } catch (e) {
+          // The request may have reached X before the connection dropped: never post it again automatically.
+          throw new UnconfirmedError(`Lost the connection while posting to X (${(e as Error).message}). Check your profile before retrying.`, firstId)
+        }
+        if (res.status >= 500)
+          throw new UnconfirmedError(`X answered ${res.status} while posting; it may have gone out. Check your profile before retrying.`, firstId)
+        const r = (await (await check(res, 'X')).json()) as { data: { id: string } }
         previous = r.data.id
         firstId ??= r.data.id
       } catch (e) {

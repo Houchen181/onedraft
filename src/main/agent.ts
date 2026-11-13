@@ -165,7 +165,7 @@ export class Agent {
           max_tokens: 64000,
           system: SYSTEM,
           tools,
-          messages: this.messages,
+          messages: withoutOldImages(this.messages),
           output_config: { effort: this.deps.effort() },
           cache_control: { type: 'ephemeral' },
           betas: ['server-side-fallback-2026-07-01'],
@@ -192,9 +192,15 @@ export class Agent {
       if (message.stop_reason === 'max_tokens') throw new Error('The reply was cut off (max tokens). Try a smaller request.')
 
       const env = this.deps.toolEnv()
+      // Stop returns at once even if a tool (a render, an approval card) is still going.
+      const stopped = new Promise<never>((_r, reject) => {
+        if (signal.aborted) reject(new Error('Stopped.'))
+        signal.addEventListener('abort', () => reject(new Error('Stopped.')), { once: true })
+      })
+      stopped.catch(() => undefined)
       const results = await Promise.all(
         uses.map(async (u) => {
-          const r = await runTool(u.name, u.input, env)
+          const r = await Promise.race([runTool(u.name, u.input, env), stopped]).catch(() => ({ ok: false, result: { error: 'Stopped by the user.' } }))
           const { data, images } = splitImages(r.result)
           let text = JSON.stringify(data ?? null, null, 1)
           if (text.length > 30_000) text = `${text.slice(0, 30_000)}… (truncated)`
@@ -220,6 +226,25 @@ export class Agent {
     }
     throw new Error('Stopped after 40 steps.')
   }
+}
+
+/**
+ * Frames from view_frames are only useful for the step that asked for them. Resending every old frame would grow
+ * each request until it hits the API's size limit, so only the latest message keeps its images.
+ */
+function withoutOldImages(messages: Msg[]): Msg[] {
+  return messages.map((m, i) => {
+    const blocks = m.content
+    if (i === messages.length - 1 || typeof blocks === 'string' || !blocks) return m
+    let changed = false
+    const content = blocks.map((b) => {
+      if (b.type !== 'tool_result' || !Array.isArray(b.content) || !b.content.some((c) => c.type === 'image')) return b
+      changed = true
+      const n = b.content.filter((c) => c.type === 'image').length
+      return { ...b, content: [...b.content.filter((c) => c.type !== 'image'), { type: 'text' as const, text: `[${n} earlier image${n > 1 ? 's' : ''} not resent]` }] }
+    })
+    return changed ? ({ ...m, content } as Msg) : m
+  })
 }
 
 function describe(e: unknown): string {

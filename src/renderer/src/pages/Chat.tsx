@@ -121,13 +121,17 @@ export function Chat({ pending, onPendingTaken }: { pending?: string; onPendingT
     try {
       await call('agent.send', t)
     } catch (e) {
+      // Not sent (e.g. Claude was still busy): give the text back instead of losing it.
+      setInput((cur) => cur || t)
       setError((e as Error).message)
     }
   }
 
   useEffect(() => {
-    if (pending && !busy) {
-      void send(pending)
+    // A request handed over from another page: send it, or keep it in the box if Claude is busy.
+    if (pending) {
+      if (busy) setInput(pending)
+      else void send(pending)
       onPendingTaken()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -4,7 +4,7 @@
 import { ContentError, NeedsLoginError, RetryableError, UnconfirmedError, type Connector, type ConnectorContext } from '../core/connector'
 import { check, expiresSoon, form, sleep, type OAuthTokens } from '../core/http'
 import { captionWithHashtags } from '../core/validate'
-import { body, fileSize, mimeOf, readChunk, requireSetting } from './util'
+import { body, fileSize, mimeOf, readChunk, requireSetting, singleFlight } from './util'
 
 const API = 'https://open.tiktokapis.com/v2'
 const CHUNK = 10_000_000
@@ -32,6 +32,8 @@ async function accessToken(ctx: ConnectorContext): Promise<string> {
   if (!t?.accessToken) throw new NeedsLoginError()
   if (!expiresSoon(t)) return t.accessToken
   if (!t.refreshToken) throw new NeedsLoginError()
+  const refreshToken = t.refreshToken
+  return singleFlight(`tiktok:${refreshToken}`, async () => {
   const res = await ctx.fetch(`${API}/oauth/token/`, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -39,7 +41,7 @@ async function accessToken(ctx: ConnectorContext): Promise<string> {
       client_key: requireSetting(ctx.setting, 'clientKey', 'the TikTok client key'),
       client_secret: requireSetting(ctx.setting, 'clientSecret', 'the TikTok client secret'),
       grant_type: 'refresh_token',
-      refresh_token: t.refreshToken
+      refresh_token: refreshToken
     })
   })
   const j = (await (await check(res, 'Refresh TikTok token')).json()) as {
@@ -53,6 +55,7 @@ async function accessToken(ctx: ConnectorContext): Promise<string> {
   const next = { ...t, accessToken: j.access_token, refreshToken: j.refresh_token ?? t.refreshToken, expiresAt: Date.now() + (j.expires_in ?? 7200) * 1000 }
   ctx.secrets.set(next)
   return next.accessToken
+  })
 }
 
 async function call<T>(ctx: ConnectorContext, path: string, payload: unknown, what: string): Promise<T> {
@@ -206,8 +209,11 @@ export const tiktok: Connector = {
     const o = content.options
     const file = content.media[0]
     const size = fileSize(file)
-    const chunkSize = size < 5_000_000 ? size : CHUNK
-    const count = size < 5_000_000 ? 1 : Math.floor(size / CHUNK)
+    // TikTok: chunks are 5–64 MB except the last (which takes the remainder, up to 128 MB); a file up to 64 MB
+    // may go as one chunk. So: one chunk up to 64 MB, else 10 MB chunks with the remainder in the last.
+    const single = size <= 64_000_000
+    const chunkSize = single ? size : CHUNK
+    const count = single ? 1 : Math.floor(size / CHUNK)
     const source_info = { source: 'FILE_UPLOAD', video_size: size, chunk_size: chunkSize, total_chunk_count: count }
     const draft = o.mode === 'draft'
 

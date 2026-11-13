@@ -216,12 +216,35 @@ function GeneratedEditor({ project, onDeleted }: { project: EditProject; onDelet
   const [busy, setBusy] = useState(false)
   const { data: voices } = useData<{ name: string; culture: string }[]>('studio.voices', [])
   const progress = useProgress(project.id)
-  const set = (patch: Partial<CompositionSpec>) => setC((x) => ({ ...x, ...patch }))
+  // What the saved project holds, and whether it was changed here since: Claude's changes to the project load in
+  // unless there are unsaved changes here, so "Render again" never quietly renders an older version.
+  const saved = useRef(JSON.stringify(project.composition ?? null))
+  const localEdits = useRef(false)
+  const set = (patch: Partial<CompositionSpec>) => {
+    localEdits.current = true
+    setC((x) => ({ ...x, ...patch }))
+  }
+  useEffect(
+    () =>
+      on('changed', async (k) => {
+        if (k !== 'projects') return
+        const p = await call<EditProject>('studio.get', project.id).catch(() => undefined)
+        const now = JSON.stringify(p?.composition ?? null)
+        if (!p?.composition || now === saved.current) return
+        saved.current = now
+        if (localEdits.current) app.toast('Claude changed this video. Your unsaved changes here are kept; Render uses them.')
+        else setC(p.composition)
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [project.id]
+  )
 
   const render = async () => {
     setBusy(true)
     try {
       await call('studio.saveGenerated', { id: project.id, name, composition: c })
+      saved.current = JSON.stringify(c)
+      localEdits.current = false
       await call('studio.render', project.id)
       app.toast('Rendered.')
     } catch (e) {

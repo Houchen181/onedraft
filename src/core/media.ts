@@ -3,7 +3,8 @@
 
 import { spawn } from 'node:child_process'
 import { statSync, mkdirSync } from 'node:fs'
-import { basename, extname, join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { basename, extname, join, resolve } from 'node:path'
 import type { MediaInfo, MediaKind } from '../shared/types'
 import { parseAspect } from './validate'
 
@@ -25,6 +26,8 @@ export function kindOf(path: string): MediaKind | undefined {
 function run(cmd: string, args: string[], signal?: AbortSignal): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const p = spawn(cmd, args, { windowsHide: true, signal })
+    p.stdout.setEncoding('utf8')
+    p.stderr.setEncoding('utf8')
     let stdout = ''
     let stderr = ''
     p.stdout.on('data', (d) => (stdout += d))
@@ -35,6 +38,12 @@ function run(cmd: string, args: string[], signal?: AbortSignal): Promise<{ code:
     p.on('error', reject)
     p.on('close', (code) => resolve({ code: code ?? -1, stdout, stderr }))
   })
+}
+
+/** True if the file (video or audio of any type ffprobe knows) has a sound track. */
+export async function hasAudioStream(tools: MediaTools, path: string): Promise<boolean> {
+  const r = await run(tools.ffprobe, ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', path])
+  return r.code === 0 && r.stdout.includes('audio')
 }
 
 export async function probe(tools: MediaTools, path: string): Promise<MediaInfo> {
@@ -101,22 +110,29 @@ export async function fit(
   onProgress?: (fraction: number) => void,
   signal?: AbortSignal
 ): Promise<MediaInfo> {
+  // The aspect becomes part of a file name: accept only "w:h" numbers, so it can never point outside outDir.
+  const am = /^(\d{1,3}(?:\.\d{1,3})?):(\d{1,3}(?:\.\d{1,3})?)$/.exec(o.aspect.trim())
+  if (!am || !(Number(am[1]) > 0 && Number(am[2]) > 0)) throw new Error(`Aspect must look like 9:16, not "${o.aspect}".`)
+  const aspect = `${am[1]}:${am[2]}`
+  if (!['crop', 'pad', 'blur'].includes(o.mode)) throw new Error(`Mode must be crop, pad or blur.`)
+  const maxSec = o.maxSec && Number.isFinite(o.maxSec) && o.maxSec > 0 ? Math.round(o.maxSec * 10) / 10 : undefined
   const info = await probe(tools, path)
   mkdirSync(o.outDir, { recursive: true })
-  const tag = `${o.aspect.replace(':', 'x')}-${o.mode}${o.maxSec ? `-${o.maxSec}s` : ''}${o.suffix ? `-${o.suffix}` : ''}`
+  const suffix = o.suffix ? `-${o.suffix.replace(/[^\w-]/g, '')}` : ''
+  const tag = `${am[1]}x${am[2]}-${o.mode}${maxSec ? `-${maxSec}s` : ''}${suffix}-${sourceId(path)}`
   const stem = basename(path, extname(path))
   if (info.kind === 'image') {
-    const { w, h } = frameFor(o.aspect, 1440)
+    const { w, h } = frameFor(aspect, 1440)
     const out = join(o.outDir, `${stem}.${tag}.jpg`)
     const r = await run(tools.ffmpeg, ['-y', '-i', path, '-filter_complex', filterFor(o.mode, w, h), '-frames:v', '1', '-q:v', '2', out], signal)
     if (r.code !== 0) throw new Error(`ffmpeg failed: ${r.stderr.trim().slice(-400)}`)
     return probe(tools, out)
   }
-  const { w, h } = frameFor(o.aspect, 1920)
+  const { w, h } = frameFor(aspect, 1920)
   const out = join(o.outDir, `${stem}.${tag}.mp4`)
-  const total = Math.min(info.durationSec ?? 0, o.maxSec ?? Infinity)
+  const total = Math.min(info.durationSec ?? 0, maxSec ?? Infinity)
   const args = ['-y', '-i', path]
-  if (o.maxSec) args.push('-t', String(o.maxSec))
+  if (maxSec) args.push('-t', String(maxSec))
   args.push(
     '-filter_complex', filterFor(o.mode, w, h),
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-r', '30',
@@ -137,10 +153,25 @@ export async function fit(
   return probe(tools, out)
 }
 
+/**
+ * Short id for a source file (its full path, size and time), so renditions of two different "clip.mp4" files never
+ * overwrite each other, and a re-render of an edited file doesn't replace a version a queued post still uses.
+ */
+function sourceId(path: string): string {
+  let stamp = ''
+  try {
+    const st = statSync(path)
+    stamp = `${st.size}:${st.mtimeMs}`
+  } catch {
+    /* probe reports missing files */
+  }
+  return createHash('sha1').update(`${resolve(path).toLowerCase()}|${stamp}`).digest('hex').slice(0, 8)
+}
+
 /** Grab one frame as a JPEG cover. */
 export async function coverFrame(tools: MediaTools, video: string, atSec: number, outDir: string): Promise<string> {
   mkdirSync(outDir, { recursive: true })
-  const out = join(outDir, `${basename(video, extname(video))}.cover-${Math.round(atSec * 10)}.jpg`)
+  const out = join(outDir, `${basename(video, extname(video))}.cover-${Math.round(atSec * 10)}-${sourceId(video)}.jpg`)
   const r = await run(tools.ffmpeg, ['-y', '-ss', String(atSec), '-i', video, '-frames:v', '1', '-q:v', '2', out])
   if (r.code !== 0) throw new Error(`ffmpeg failed: ${r.stderr.trim().slice(-300)}`)
   return out
@@ -149,7 +180,7 @@ export async function coverFrame(tools: MediaTools, video: string, atSec: number
 /** Convert any image to JPEG (Instagram feed only takes JPEG). */
 export async function toJpeg(tools: MediaTools, image: string, outDir: string): Promise<string> {
   mkdirSync(outDir, { recursive: true })
-  const out = join(outDir, `${basename(image, extname(image))}.jpg`)
+  const out = join(outDir, `${basename(image, extname(image))}-${sourceId(image)}.jpg`)
   const r = await run(tools.ffmpeg, ['-y', '-i', image, '-q:v', '2', out])
   if (r.code !== 0) throw new Error(`ffmpeg failed: ${r.stderr.trim().slice(-300)}`)
   return out

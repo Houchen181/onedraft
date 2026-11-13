@@ -48,12 +48,29 @@ export const form = (o: Record<string, string | undefined>) => {
 
 export const sleep = (ms: number, signal?: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
-    const t = setTimeout(resolve, ms)
-    signal?.addEventListener('abort', () => {
+    if (signal?.aborted) return reject(new Error('Canceled'))
+    const onAbort = () => {
       clearTimeout(t)
       reject(new Error('Canceled'))
-    })
+    }
+    // Remove the listener when the sleep ends: polling loops sleep hundreds of times on one signal.
+    const t = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal?.addEventListener('abort', onAbort, { once: true })
   })
+
+/** Seconds until the next midnight in Los Angeles, when YouTube's daily quota resets. */
+export function secondsToPacificMidnight(now = new Date()): number {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      .formatToParts(now)
+      .map((p) => [p.type, p.value])
+  )
+  const elapsed = (Number(parts.hour) % 24) * 3600 + Number(parts.minute) * 60 + Number(parts.second)
+  return Math.max(60, 86400 - elapsed)
+}
 
 /** Token bundle most OAuth connectors store as the account secret. */
 export interface OAuthTokens {

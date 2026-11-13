@@ -324,6 +324,22 @@ export class Store {
    * draft targets are replaced by the draft's list.
    */
   savePost(d: PostDraft, accountPlatform: (accountId: string) => string | undefined): Post {
+    // All or nothing: an unknown account must not leave the post half saved.
+    for (const t of d.targets) if (!accountPlatform(t.accountId)) throw new Error(`Unknown account ${t.accountId}`)
+    this.db.exec('begin')
+    let id: string
+    try {
+      id = this.savePostRows(d, accountPlatform)
+      this.db.exec('commit')
+    } catch (e) {
+      this.db.exec('rollback')
+      throw e
+    }
+    this.changed('posts')
+    return this.getPost(id)!
+  }
+
+  private savePostRows(d: PostDraft, accountPlatform: (accountId: string) => string | undefined): string {
     const id = d.id ?? randomUUID()
     const ts = now()
     const exists = d.id ? this.db.prepare('select 1 from posts where id = ?').get(d.id) : undefined
@@ -341,11 +357,12 @@ export class Store {
     // Targets keep their ids across saves (agents refer to them); queued/published ones are left alone.
     const current = (this.db.prepare('select * from targets where post_id = ?').all(id) as Row[]).map((r) => this.toTarget(r))
     const editable = (t: Target) => t.status === 'draft' || t.status === 'canceled'
+    // One target per account: if a draft names an account twice, the last version wins.
     const wanted = new Map(d.targets.map((t) => [t.accountId, t]))
     for (const t of current) {
       if (editable(t) && !wanted.has(t.accountId)) this.db.prepare('delete from targets where id = ?').run(t.id)
     }
-    for (const t of d.targets) {
+    for (const t of wanted.values()) {
       const existing = current.find((c) => c.accountId === t.accountId)
       if (existing && !editable(existing)) continue
       if (existing) {
@@ -363,8 +380,7 @@ export class Store {
         )
         .run(randomUUID(), id, t.accountId, platform, json(t.variant ?? {}), d.scheduledAt ?? null, ts)
     }
-    this.changed('posts')
-    return this.getPost(id)!
+    return id
   }
 
   updateTargetVariant(targetId: string, patch: Variant) {
@@ -422,6 +438,11 @@ export class Store {
 
   private touchPost(postId: string) {
     this.db.prepare('update posts set updated_at = ? where id = ?').run(now(), postId)
+  }
+
+  setPostSchedule(id: string, scheduledAt: string | null) {
+    this.db.prepare('update posts set scheduled_at = ?, updated_at = ? where id = ?').run(scheduledAt, now(), id)
+    this.changed('posts')
   }
 
   removePost(id: string) {
@@ -512,6 +533,13 @@ export class Store {
     }
     this.changed('projects')
     return this.getProject(id)!
+  }
+
+  /** Set a project's rendered file without touching anything else. Undefined if the project is gone. */
+  setProjectOutput(id: string, output: string): EditProject | undefined {
+    this.db.prepare('update edits set output = ?, updated_at = ? where id = ?').run(output, now(), id)
+    this.changed('projects')
+    return this.getProject(id)
   }
 
   removeProject(id: string) {

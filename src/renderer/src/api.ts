@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 interface Bridge {
   call(method: string, ...args: unknown[]): Promise<unknown>
-  on(channel: 'changed' | 'progress' | 'agent' | 'approval', fn: (payload: unknown) => void): () => void
+  on(channel: 'changed' | 'progress' | 'agent' | 'approval' | 'approval-closed', fn: (payload: unknown) => void): () => void
 }
 
 declare global {
@@ -22,7 +22,7 @@ export async function call<T = unknown>(method: string, ...args: unknown[]): Pro
   }
 }
 
-export const on = (channel: 'changed' | 'progress' | 'agent' | 'approval', fn: (payload: unknown) => void) => window.onedraft.on(channel, fn)
+export const on = (channel: 'changed' | 'progress' | 'agent' | 'approval' | 'approval-closed', fn: (payload: unknown) => void) => window.onedraft.on(channel, fn)
 
 /** Load data from the main process and reload when it reports a change of `kind`. */
 export function useData<T>(method: string, args: unknown[], kinds: ('posts' | 'accounts' | 'events' | 'projects')[] = []) {

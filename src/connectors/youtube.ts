@@ -7,7 +7,7 @@ import {
   type Connector,
   type ConnectorContext
 } from '../core/connector'
-import { check, expiresSoon, form, getJson, HttpError, sleep, type OAuthTokens } from '../core/http'
+import { check, expiresSoon, form, getJson, HttpError, secondsToPacificMidnight, sleep, type OAuthTokens } from '../core/http'
 import type { Account, Comment } from '../shared/types'
 import { body, fileSize, mimeOf, readChunk, requireSetting } from './util'
 
@@ -218,7 +218,7 @@ export const youtube: Connector = {
     }
     const notify = content.options.notifySubscribers === false ? 'false' : 'true'
     const token = await accessToken(ctx)
-    const init = await check(
+    const init = await checkQuota(
       await ctx.fetch(`${UPLOAD}/videos?uploadType=resumable&part=snippet,status&notifySubscribers=${notify}`, {
         method: 'POST',
         headers: {
@@ -262,8 +262,10 @@ export const youtube: Connector = {
         break
       }
       if (res.status === 404) throw new RetryableError('YouTube upload session expired; will start over.', 60)
-      if (res.status >= 500 && failures < 6) {
-        res = await resumeStatus(ctx, session, size, ++failures, end === size - 1)
+      if (res.status >= 500) {
+        // Ask where the upload stands, through further server errors. resumeStatus gives up after 6 tries,
+        // as unconfirmed if the last byte was sent (YouTube may have finished the video).
+        while (res.status >= 500) res = await resumeStatus(ctx, session, size, ++failures, end === size - 1)
         if (res.status === 308) {
           const range = res.headers.get('range')
           offset = range ? Number(range.split('-')[1]) + 1 : 0
@@ -350,6 +352,16 @@ export const youtube: Connector = {
 }
 
 /** Ask the session how much it has after a dropped request (Content-Range: bytes * /size). */
+/** The daily upload limit and API quota reset at midnight Pacific; nothing was sent yet, so retrying is safe. */
+async function checkQuota(res: Response, what: string): Promise<Response> {
+  if (res.status === 403 || res.status === 400) {
+    const text = await res.clone().text().catch(() => '')
+    if (/quotaExceeded|uploadLimitExceeded|rateLimitExceeded|dailyLimitExceeded/.test(text))
+      throw new RetryableError(`YouTube's daily limit is used up (${/"reason":\s*"(\w+)"/.exec(text)?.[1] ?? 'quota'}); will try again after it resets.`, secondsToPacificMidnight() + 300)
+  }
+  return check(res, what)
+}
+
 async function resumeStatus(ctx: ConnectorContext, session: string, size: number, failures: number, wasLastChunk: boolean): Promise<Response> {
   if (failures > 6) {
     if (wasLastChunk) throw new UnconfirmedError('Lost the connection while YouTube was finishing the upload.')

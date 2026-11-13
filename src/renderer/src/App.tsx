@@ -34,7 +34,26 @@ export function App() {
   const loadPlatforms = useCallback(() => void call<PlatformManifest[]>('platforms').then(setPlatforms), [])
   useEffect(loadPlatforms, [loadPlatforms, page])
   useEffect(() => on('changed', (k) => k === 'platforms' && loadPlatforms()), [loadPlatforms])
-  useEffect(() => on('approval', (r) => setApprovals((a) => [...a, r as ApprovalRequest])), [])
+  useEffect(() => {
+    // Cards still waiting (e.g. after a reload), new ones as they come, and ones that expired or were answered.
+    void call<ApprovalRequest[]>('approvals.list').then((list) => setApprovals((a) => [...a, ...list.filter((r) => !a.some((x) => x.id === r.id))]))
+    const offNew = on('approval', (r) => setApprovals((a) => (a.some((x) => x.id === (r as ApprovalRequest).id) ? a : [...a, r as ApprovalRequest])))
+    const offClosed = on('approval-closed', (id) => setApprovals((a) => a.filter((x) => x.id !== id)))
+    return () => {
+      offNew()
+      offClosed()
+    }
+  }, [])
+  // A double click must not approve the next card unread: buttons wake up a moment after a card appears.
+  // Armed per card id, so a new card is never clickable until its own delay has passed.
+  const [armedFor, setArmedFor] = useState<string>()
+  const shownId = approvals[0]?.id
+  const armed = !!shownId && armedFor === shownId
+  useEffect(() => {
+    if (!shownId) return
+    const t = setTimeout(() => setArmedFor(shownId), 700)
+    return () => clearTimeout(t)
+  }, [shownId])
   useEffect(() => {
     void call<{ busy: boolean }>('agent.history').then((h) => setAssistantBusy(h.busy))
     return on('agent', (e) => {
@@ -62,8 +81,10 @@ export function App() {
       },
       ask: (text, opts) => {
         if (opts?.background) {
-          void call('agent.send', text)
-          toast('Claude is on it — you can keep working.')
+          call('agent.send', text).then(
+            () => toast('Claude is on it — you can keep working.'),
+            (e: Error) => toast(e.message, true)
+          )
         } else {
           setPendingAsk(text)
           setPage('chat')
@@ -91,8 +112,10 @@ export function App() {
   const active = (posts ?? []).filter((p) => ['queued', 'publishing', 'partial', 'failed'].includes(p.status)).length
   const approval = approvals[0]
   const answer = (ok: boolean) => {
-    void call('approvals.respond', approval.id, ok)
-    setApprovals((a) => a.slice(1))
+    if (!armed) return
+    const id = approval.id
+    setApprovals((a) => a.filter((x) => x.id !== id))
+    call('approvals.respond', id, ok).catch((e: Error) => toast(e.message, true))
   }
   const name = String(profile?.values['profile.name'] ?? '') || accounts?.[0]?.name || 'You'
   const connected = accounts?.filter((a) => a.status === 'connected').length ?? 0
@@ -143,10 +166,10 @@ export function App() {
             {approval.detail}
           </div>
           <div className="actions">
-            <button className="btn" onClick={() => answer(false)}>
+            <button className="btn" disabled={!armed} onClick={() => answer(false)}>
               Decline
             </button>
-            <button className="btn primary" onClick={() => answer(true)}>
+            <button className="btn primary" disabled={!armed} onClick={() => answer(true)}>
               Approve
             </button>
           </div>

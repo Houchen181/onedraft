@@ -85,8 +85,9 @@ async function videoContainer(
   host: MediaHost | undefined,
   hosted: string[]
 ): Promise<string> {
+  // Creating the container can fail for real reasons (login, rate limit, caption): let those through as they are.
+  const c = await graph<{ id: string; uri?: string }>(ctx, `/${igId}/media`, { ...params, upload_type: 'resumable' }, 'POST')
   try {
-    const c = await graph<{ id: string; uri?: string }>(ctx, `/${igId}/media`, { ...params, upload_type: 'resumable' }, 'POST')
     const size = fileSize(path)
     const uri = c.uri ?? `https://rupload.facebook.com/ig-api-upload/${ver(ctx)}/${c.id}`
     await check(
@@ -100,6 +101,8 @@ async function videoContainer(
     )
     return c.id
   } catch (e) {
+    // Only a refused direct upload (a 4xx from rupload) falls back to the media host.
+    if (!(e instanceof HttpError)) throw e
     if (!host) {
       throw new ContentError(
         `Instagram would not take a direct video upload (${(e as Error).message.slice(0, 200)}). Set up a public media host in Settings so Instagram can fetch the file.`

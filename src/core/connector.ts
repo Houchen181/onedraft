@@ -101,6 +101,8 @@ export interface Connector {
   manifest: PlatformManifest
   /** Extra platform-specific checks on top of the manifest constraints. */
   validate?(content: ResolvedContent): Issue[]
+  /** Adjust the manifest to the platform's settings (e.g. X Premium's longer posts). Called at start and on changes. */
+  applySettings?(setting: (key: string) => string | undefined): void
   /** Interactive login. `input` holds the values of manifest.connectFields. */
   connect(ctx: ConnectorContext, input: Record<string, string>): Promise<ConnectResult>
   /** Is the saved login still good? Should refresh tokens when it can. */

@@ -1,8 +1,12 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 
+type Channel = 'changed' | 'progress' | 'agent' | 'approval' | 'approval-closed'
+const CHANNELS: Channel[] = ['changed', 'progress', 'agent', 'approval', 'approval-closed']
+
 const api = {
   call: (method: string, ...args: unknown[]) => ipcRenderer.invoke('call', method, ...args),
-  on: (channel: 'changed' | 'progress' | 'agent' | 'approval', fn: (payload: unknown) => void) => {
+  on: (channel: Channel, fn: (payload: unknown) => void) => {
+    if (!CHANNELS.includes(channel)) throw new Error(`Unknown channel ${channel}`)
     const listener = (_e: IpcRendererEvent, payload: unknown) => fn(payload)
     ipcRenderer.on(channel, listener)
     return () => {

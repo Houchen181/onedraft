@@ -46,6 +46,17 @@ function nativeScheduleFits(c: Connector, leadMs: number, minLeadMs = NATIVE_SCH
   return leadMs >= min && leadMs <= max
 }
 
+/** Connectors (plugins especially) may throw strings or plain objects; keep their name and message. */
+function asError(e: unknown): Error {
+  if (e instanceof Error) return e
+  if (e && typeof e === 'object' && 'message' in e) {
+    const err = new Error(String((e as { message: unknown }).message))
+    Object.assign(err, e)
+    return err
+  }
+  return new Error(typeof e === 'string' ? e : JSON.stringify(e) ?? String(e))
+}
+
 export class Engine {
   private running = new Set<string>()
   private busyAccounts = new Set<string>()
@@ -199,6 +210,9 @@ export class Engine {
     const post = this.mustPost(id)
     const when = publishAt ? new Date(publishAt) : undefined
     if (when && Number.isNaN(when.getTime())) throw new Error(`Bad publish time "${publishAt}"`)
+    // A time more than a few minutes gone is a mistake (wrong day or year), not "post now".
+    if (when && when.getTime() < Date.now() - 5 * 60_000)
+      throw new Error(`${when.toLocaleString()} has already passed. Pick a later time, or clear it to publish now.`)
     const drafts = post.targets.filter((t) => t.status === 'draft' || t.status === 'canceled')
     if (!drafts.length) throw new Error('Nothing to approve: no draft targets on this post.')
     const problems: string[] = []
@@ -207,7 +221,12 @@ export class Engine {
       if (errs.length) problems.push(`${t.platform}: ${errs.map((e) => e.message).join(' ')}`)
     }
     if (problems.length) throw new Error(`Fix these first:\n${problems.join('\n')}`)
+    let queued = 0
     for (const t of drafts) {
+      // Checked again after the (slow) validation: a second approve or a cancel may have moved it on meanwhile,
+      // and queueing a target that already went out would post it twice.
+      if (this.store.getTarget(t.id)?.status !== t.status) continue
+      queued++
       const c = this.connector(t.platform)
       const lead = when ? when.getTime() - Date.now() : 0
       // Native scheduling: start the upload now; otherwise wait until the publish time.
@@ -216,9 +235,13 @@ export class Engine {
         status: 'queued',
         scheduledAt: when?.toISOString() ?? null,
         error: null,
+        attempts: 0,
         nextAttemptAt: startAt.toISOString()
       })
     }
+    if (!queued) throw new Error('This post was already approved.')
+    // The post's own time follows what was approved, so lists and the calendar show the real time.
+    this.store.setPostSchedule(id, when?.toISOString() ?? null)
     this.store.log('info', `Approved "${post.title || post.body.slice(0, 40)}" for ${drafts.length} account(s)${when ? ` for ${when.toLocaleString()}` : ''}`, id)
     return this.mustPost(id)
   }
@@ -232,6 +255,26 @@ export class Engine {
     return this.mustPost(id)
   }
 
+  /** Targets the platform itself holds for later: OneDraft can't take them back, only the platform can. */
+  heldByPlatform(post: Post): Target[] {
+    return post.targets.filter((t) => t.status === 'scheduled' && (!t.scheduledAt || new Date(t.scheduledAt).getTime() > Date.now()))
+  }
+
+  /** Delete a post from OneDraft. Refused while it is publishing: the result must land somewhere. */
+  removePost(id: string) {
+    const post = this.mustPost(id)
+    if (post.targets.some((t) => t.status === 'publishing'))
+      throw new Error('This post is publishing right now. Wait for it to finish, then delete it.')
+    const held = this.heldByPlatform(post)
+    if (held.length)
+      throw new Error(
+        `This post is already scheduled on ${held.map((t) => this.registry.has(t.platform) ? this.connector(t.platform).manifest.name : t.platform).join(', ')} and will go out from there. ` +
+          'Remove it on the platform first; OneDraft keeps it here until its time has passed so you can find it.'
+      )
+    this.cancel(id)
+    this.store.removePost(id)
+  }
+
   /** Retry a failed target. Unconfirmed ones need `force` because they may already be live. */
   retry(targetId: string, force = false) {
     const t = this.store.getTarget(targetId)
@@ -239,7 +282,7 @@ export class Engine {
     if (t.status === 'unconfirmed' && !force)
       throw new Error('This one may already be live. Check the platform first, then retry with force to post it again.')
     if (!['failed', 'unconfirmed', 'canceled', 'handoff'].includes(t.status)) throw new Error(`Cannot retry a ${t.status} target.`)
-    this.store.setTarget(targetId, { status: 'queued', error: null, nextAttemptAt: new Date().toISOString() })
+    this.store.setTarget(targetId, { status: 'queued', error: null, attempts: 0, nextAttemptAt: new Date().toISOString() })
   }
 
   /** Called once at startup: anything left "publishing" may have gone through. */
@@ -296,6 +339,12 @@ export class Engine {
       const c = this.connector(t.platform)
       const issues = (await this.validateTarget(post, t)).filter((i) => i.level === 'error' && i.field !== 'account')
       if (issues.length) throw new ContentError(issues.map((i) => i.message).join(' '))
+      // Canceled while it was being checked: nothing has been sent, so it's a plain cancel.
+      if (abort.signal.aborted) {
+        this.store.setTarget(targetId, { status: 'canceled', error: null, nextAttemptAt: null })
+        this.store.log('info', `Canceled before sending to ${label}`, scope)
+        return
+      }
       const content = withOptionDefaults(c.manifest, resolveContent(post, t))
       const lead = t.scheduledAt ? new Date(t.scheduledAt).getTime() - Date.now() : 0
       // The upload may run long; allow a smaller margin here than when deciding to start early.
@@ -307,7 +356,7 @@ export class Engine {
       this.store.setTarget(targetId, { status, remoteId: r.remoteId ?? null, url: r.url ?? null, error: r.note ?? null, nextAttemptAt: null })
       this.store.log('info', `${status === 'published' ? 'Published' : status === 'scheduled' ? 'Scheduled' : 'Ready for you to publish'} on ${label}${r.url ? `: ${r.url}` : ''}${r.note && !(r.url && r.note.includes(r.url)) ? ` (${r.note})` : ''}`, scope)
     } catch (e) {
-      this.handleFailure(t, account, attempts, e as Error, abort.signal.aborted)
+      this.handleFailure(t, account, attempts, asError(e), abort.signal.aborted)
     } finally {
       this.running.delete(targetId)
       this.busyAccounts.delete(account.id)

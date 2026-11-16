@@ -11,6 +11,7 @@ import ffprobeStatic from 'ffprobe-static'
 import { BUILTINS, loadBridges, loadPlugins } from '../connectors'
 import { detectSilences, parseSrt, speechSegments } from '../core/edit'
 import { Engine } from '../core/engine'
+import { Inbox } from '../core/inbox'
 import { coverFrame, fit, kindOf, probe, type FitMode } from '../core/media'
 import { Registry } from '../core/registry'
 import { plainCipher, Store, type Cipher } from '../core/store'
@@ -93,6 +94,13 @@ async function main() {
   const engine = new Engine(store, registry, makeContext, mediaTools)
   engine.recover()
 
+  // ---- inbox: comments and post numbers ----
+  const inboxEvery = () => {
+    const v = Number(store.getSetting('inbox.checkEveryMin') ?? 30)
+    return Number.isFinite(v) && v >= 0 ? v : 30
+  }
+  const inbox = new Inbox(engine, { everyMin: inboxEvery, onChange: () => send('changed', 'inbox') })
+
   // ---- local media for previews and compositions ----
   const mediaHandler = (req: Request) => {
     const p = decodeURIComponent(new URL(req.url).pathname.replace(/^\//, ''))
@@ -141,6 +149,7 @@ async function main() {
   const toolEnv = (source: 'agent' | 'mcp'): ToolEnv => ({
     engine,
     studio,
+    inbox,
     mediaDir: paths.media,
     requestApproval,
     autoApprove: () => store.getSetting('ai.autoApprove') === true,
@@ -323,9 +332,24 @@ async function main() {
     'studio.remove': (id: string) => studio.remove(id),
     'studio.voices': () => studio.voices(),
     'media.cover': (path: string, atSec: number) => coverFrame(mediaTools, path, atSec, join(paths.media, 'covers')),
+    'inbox.list': () => store.listComments(),
+    'inbox.status': () => inbox.status(),
+    'inbox.check': async () => {
+      const r = await inbox.check()
+      return { ...inbox.status(), added: r.added.length }
+    },
+    'inbox.reply': (key: string, text: string) => inbox.reply(String(key), String(text ?? '')),
+    'inbox.setDraft': (key: string, text: string) => store.setCommentDraft(String(key), typeof text === 'string' ? text : undefined, 'you'),
+    'inbox.setState': (keys: string[], state: 'open' | 'done') => {
+      if (!Array.isArray(keys) || (state !== 'open' && state !== 'done')) throw new Error('Bad request.')
+      store.setCommentState(keys.map(String), state)
+    },
+    'stats.list': () => store.listStats(),
+    'stats.refresh': (targetIds?: string[]) => inbox.refreshStats(Array.isArray(targetIds) ? targetIds.map(String) : undefined),
     'settings.get': () => store.allSettings(),
     'settings.set': async (entries: { key: string; value: unknown; secret?: boolean }[]) => {
       for (const e of entries) store.setSetting(e.key, e.value, !!e.secret)
+      if (entries.some((e) => e.key.startsWith('inbox.'))) send('changed', 'inbox')
       if (entries.some((e) => e.key.startsWith('mcp.'))) await syncMcp()
       if (entries.some((e) => e.key === 'mcpBridges')) reloadExtensions()
       applySettings()
@@ -382,6 +406,31 @@ async function main() {
   // ---- scheduler ----
   setInterval(() => engine.tick(), 15_000)
   setTimeout(() => engine.tick(), 3000)
+
+  // New comments, looked for in the background as often as Inbox → "Check every" says.
+  const backgroundCheck = async () => {
+    const every = inboxEvery()
+    if (!every || !inbox.accounts().length) return
+    const last = inbox.lastCheckedAt ? new Date(inbox.lastCheckedAt).getTime() : 0
+    if (Date.now() - last < every * 60_000) return
+    const { added } = await inbox.check({ background: true })
+    // No pop-up while you're looking at OneDraft: the Inbox badge already shows them.
+    if (!added.length || !Notification.isSupported() || win?.isFocused()) return
+    const names = [...new Set(added.map((c) => c.author))]
+    const n = new Notification(
+      added.length === 1
+        ? { title: `New comment from ${added[0].author}`, body: added[0].text.slice(0, 200) }
+        : { title: `${added.length} new comments`, body: `From ${names.slice(0, 3).join(', ')}${names.length > 3 ? ` and ${names.length - 3} more` : ''}` }
+    )
+    n.on('click', () => {
+      showWindow()
+      send('navigate', 'inbox')
+    })
+    n.show()
+  }
+  const runBackgroundCheck = () => void backgroundCheck().catch((e: Error) => store.log('warn', `Inbox check: ${e.message}`))
+  setInterval(runBackgroundCheck, 60_000)
+  setTimeout(runBackgroundCheck, 20_000)
   setInterval(
     () => {
       for (const a of store.listAccounts()) {

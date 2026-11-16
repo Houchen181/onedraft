@@ -310,7 +310,10 @@ export const youtube: Connector = {
         snippet: {
           videoId?: string
           totalReplyCount: number
-          topLevelComment: { id: string; snippet: { authorDisplayName: string; textOriginal: string; publishedAt: string; likeCount: number } }
+          topLevelComment: {
+            id: string
+            snippet: { authorDisplayName: string; authorChannelId?: { value?: string }; textOriginal: string; publishedAt: string; likeCount: number }
+          }
         }
       }[]
     }>(ctx, `/commentThreads?part=snippet&order=time&maxResults=${Math.min(100, limit)}&${q}`)
@@ -323,7 +326,8 @@ export const youtube: Connector = {
         likeCount: t.snippet.topLevelComment.snippet.likeCount,
         replyCount: t.snippet.totalReplyCount,
         postRemoteId: t.snippet.videoId,
-        url: t.snippet.videoId ? `https://www.youtube.com/watch?v=${t.snippet.videoId}&lc=${t.snippet.topLevelComment.id}` : undefined
+        url: t.snippet.videoId ? `https://www.youtube.com/watch?v=${t.snippet.videoId}&lc=${t.snippet.topLevelComment.id}` : undefined,
+        mine: !!account.meta.channelId && t.snippet.topLevelComment.snippet.authorChannelId?.value === account.meta.channelId
       })
     )
   },

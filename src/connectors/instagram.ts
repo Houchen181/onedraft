@@ -276,7 +276,18 @@ export const instagram: Connector = {
         fields: 'id,text,username,timestamp,like_count',
         limit: String(Math.min(50, limit))
       })
-      out.push(...r.data.map((c) => ({ id: c.id, author: c.username ?? 'someone', text: c.text, publishedAt: c.timestamp, likeCount: c.like_count, postRemoteId: id })))
+      const me = account.meta.username as string | undefined
+      out.push(
+        ...r.data.map((c) => ({
+          id: c.id,
+          author: c.username ?? 'someone',
+          text: c.text,
+          publishedAt: c.timestamp,
+          likeCount: c.like_count,
+          postRemoteId: id,
+          mine: !!me && c.username === me
+        }))
+      )
     }
     return out.slice(0, limit)
   },

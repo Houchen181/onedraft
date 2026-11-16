@@ -1,7 +1,7 @@
 // X (Twitter) via API v2: OAuth 2.0 PKCE (native app, no secret), chunked media upload, threads.
 
 import { NeedsLoginError, RetryableError, UnconfirmedError, type Connector, type ConnectorContext } from '../core/connector'
-import { check, expiresSoon, form, getJson, sleep, type OAuthTokens } from '../core/http'
+import { check, expiresSoon, form, getJson, HttpError, sleep, type OAuthTokens } from '../core/http'
 import { weightedLength } from '../core/validate'
 import type { Comment } from '../shared/types'
 import { fileSize, isVideo, mimeOf, readChunk, requireSetting, singleFlight, splitThread } from './util'
@@ -86,7 +86,8 @@ export const x: Connector = {
     color: '#71767b',
     source: 'builtin',
     docsUrl: 'https://docs.x.com/x-api/posts/create-post',
-    capabilities: { video: true, image: true, text: true, nativeSchedule: false, comments: true, reply: true, stats: true },
+    // Replies are found with recent search, which covers the last 7 days.
+    capabilities: { video: true, image: true, text: true, nativeSchedule: false, comments: true, commentsPerPost: { days: 7 }, reply: true, stats: true },
     constraints: {
       caption: { max: 280, unit: 'weighted', overflow: 'thread' },
       tags: { style: 'hashtags' },
@@ -222,13 +223,25 @@ export const x: Connector = {
     return { remoteId: firstId, url: `https://x.com/${username}/status/${firstId}`, state: 'published', note: parts.length > 1 ? `Posted as a ${parts.length}-part thread` : undefined }
   },
 
-  async listComments(ctx, _account, { remoteId, limit = 50 }) {
+  async listComments(ctx, account, { remoteId, limit = 50, sinceId }) {
     if (!remoteId) return []
-    const r = await api<{ data?: { id: string; text: string; author_id: string; created_at?: string; public_metrics?: { like_count: number; reply_count: number } }[]; includes?: { users?: { id: string; username: string }[] } }>(
-      ctx,
-      `/tweets/search/recent?query=${encodeURIComponent(`conversation_id:${remoteId}`)}&max_results=${Math.max(10, Math.min(100, limit))}&tweet.fields=created_at,public_metrics,author_id&expansions=author_id`
-    )
+    type Found = { data?: { id: string; text: string; author_id: string; created_at?: string; public_metrics?: { like_count: number; reply_count: number } }[]; includes?: { users?: { id: string; username: string }[] } }
+    // X bills every post read, so ask only for replies newer than the ones OneDraft has (since_id).
+    const search = (since?: string) =>
+      api<Found>(
+        ctx,
+        `/tweets/search/recent?query=${encodeURIComponent(`conversation_id:${remoteId}`)}&max_results=${Math.max(10, Math.min(100, limit))}&tweet.fields=created_at,public_metrics,author_id&expansions=author_id${since ? `&since_id=${encodeURIComponent(since)}` : ''}`
+      )
+    let r: Found
+    try {
+      r = await search(sinceId)
+    } catch (e) {
+      // since_id must be inside search's 7-day window; an older one is refused, so ask without it.
+      if (!(sinceId && e instanceof HttpError && e.status === 400 && /since_id/i.test(e.body))) throw e
+      r = await search()
+    }
     const users = new Map((r.includes?.users ?? []).map((u) => [u.id, u.username]))
+    const me = String(account.meta.userId ?? '')
     return (r.data ?? []).map(
       (t): Comment => ({
         id: t.id,
@@ -238,7 +251,9 @@ export const x: Connector = {
         likeCount: t.public_metrics?.like_count,
         replyCount: t.public_metrics?.reply_count,
         postRemoteId: remoteId,
-        url: `https://x.com/i/status/${t.id}`
+        url: `https://x.com/i/status/${t.id}`,
+        // The thread's own later parts and the account's replies come back too.
+        mine: !!me && t.author_id === me
       })
     )
   },

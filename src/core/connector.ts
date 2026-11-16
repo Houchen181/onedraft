@@ -108,10 +108,15 @@ export interface Connector {
   /** Is the saved login still good? Should refresh tokens when it can. */
   check?(ctx: ConnectorContext, account: Account): Promise<AccountCheck>
   publish(ctx: ConnectorContext, account: Account, req: PublishRequest): Promise<PublishResult>
+  /**
+   * Recent comments on the account's posts, or on one post (remoteId). Set `mine` on comments the account wrote
+   * itself. `sinceId` is the newest comment OneDraft has seen on that post (the account's own included):
+   * platforms that bill per read should return only newer ones.
+   */
   listComments?(
     ctx: ConnectorContext,
     account: Account,
-    opts: { remoteId?: string; limit?: number }
+    opts: { remoteId?: string; limit?: number; sinceId?: string }
   ): Promise<Comment[]>
   reply?(
     ctx: ConnectorContext,

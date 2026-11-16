@@ -2,9 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 
+type Channel = 'changed' | 'progress' | 'agent' | 'approval' | 'approval-closed' | 'navigate'
+
 interface Bridge {
   call(method: string, ...args: unknown[]): Promise<unknown>
-  on(channel: 'changed' | 'progress' | 'agent' | 'approval' | 'approval-closed', fn: (payload: unknown) => void): () => void
+  on(channel: Channel, fn: (payload: unknown) => void): () => void
 }
 
 declare global {
@@ -22,10 +24,10 @@ export async function call<T = unknown>(method: string, ...args: unknown[]): Pro
   }
 }
 
-export const on = (channel: 'changed' | 'progress' | 'agent' | 'approval' | 'approval-closed', fn: (payload: unknown) => void) => window.onedraft.on(channel, fn)
+export const on = (channel: Channel, fn: (payload: unknown) => void) => window.onedraft.on(channel, fn)
 
 /** Load data from the main process and reload when it reports a change of `kind`. */
-export function useData<T>(method: string, args: unknown[], kinds: ('posts' | 'accounts' | 'events' | 'projects')[] = []) {
+export function useData<T>(method: string, args: unknown[], kinds: ('posts' | 'accounts' | 'events' | 'projects' | 'inbox' | 'stats')[] = []) {
   const [data, setData] = useState<T>()
   const [error, setError] = useState<string>()
   const key = JSON.stringify([method, args])

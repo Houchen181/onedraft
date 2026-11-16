@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { Post, Target } from '@shared/types'
-import { fileName, isVideoPath, mediaUrl, useData } from '../api'
+import { call, fileName, isVideoPath, mediaUrl, useData } from '../api'
+import { canHaveStats, postTotals, statEntries, useStats } from '../stats'
 import { fmtTime, PlatformIcon, Status, useApp } from '../ui'
 
 export const TARGET_DOT: Record<string, string> = {
@@ -33,9 +34,25 @@ export function postTitle(p: Post) {
 export function Posts() {
   const app = useApp()
   const { data: posts } = useData<Post[]>('posts.list', [], ['posts'])
+  const { stats } = useStats()
   const [filter, setFilter] = useState('all')
+  const [reading, setReading] = useState(false)
   const test = FILTERS.find((f) => f[0] === filter)![2]
   const shown = (posts ?? []).filter(test)
+  const withNumbers = (posts ?? []).some((p) => p.targets.some((t) => canHaveStats(t, app.platform(t.platform))))
+  const refreshNumbers = async () => {
+    setReading(true)
+    try {
+      const r = await call<{ updated: number; failed: number }>('stats.refresh')
+      if (!r.updated && !r.failed) app.toast('Nothing to read: numbers come from posts of the last 30 days on platforms that report them.')
+      else if (r.failed) app.toast(`${r.failed} platform${r.failed === 1 ? '' : 's'} couldn’t be read; open the post to see why.${r.updated ? ` The other ${r.updated} are up to date.` : ''}`, !r.updated)
+      else app.toast('Numbers updated.')
+    } catch (e) {
+      app.toast((e as Error).message, true)
+    } finally {
+      setReading(false)
+    }
+  }
   const when = (p: Post) => {
     if (p.scheduledAt) return `${p.status === 'published' ? 'Posted' : 'For'} ${fmtTime(p.scheduledAt)}`
     const done = p.targets.find((t) => t.status === 'published')
@@ -57,6 +74,11 @@ export function Posts() {
           <h1>Posts</h1>
           <p className="sub">Everything you’ve drafted, scheduled and posted.</p>
         </div>
+        {withNumbers && (
+          <button className="btn" disabled={reading} onClick={() => void refreshNumbers()} title="Read views, likes and comments from the platforms (posts from the last 30 days)">
+            {reading ? 'Reading numbers…' : '↻ Numbers'}
+          </button>
+        )}
         <button className="btn primary" onClick={() => app.newPost()}>
           + New post
         </button>
@@ -82,20 +104,30 @@ export function Posts() {
         </div>
       )}
       <div className="stack" style={{ gap: 2 }}>
-        {shown.map((p) => (
-          <div key={p.id} className="plist-row" onClick={() => app.go('post', p.id)}>
-            <Thumb path={p.media[0]} />
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{postTitle(p)}</div>
-              <div className="small muted">
-                {when(p)}
-                {p.aiGenerated && ' · AI-labelled'}
+        {shown.map((p) => {
+          const totals = postTotals(p.targets, stats)
+          return (
+            <div key={p.id} className="plist-row" onClick={() => app.go('post', p.id)}>
+              <Thumb path={p.media[0]} />
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{postTitle(p)}</div>
+                <div className="small muted">
+                  {when(p)}
+                  {p.aiGenerated && ' · AI-labelled'}
+                </div>
+                {totals && (
+                  <div className="pstats" title="Added up across platforms">
+                    {statEntries(totals)
+                      .map((e) => e.text)
+                      .join(' · ')}
+                  </div>
+                )}
+                <div className="ptargets">{p.targets.map(icon)}</div>
               </div>
-              <div className="ptargets">{p.targets.map(icon)}</div>
+              <Status s={p.status} />
             </div>
-            <Status s={p.status} />
-          </div>
-        ))}
+          )
+        })}
       </div>
     </div>
   )

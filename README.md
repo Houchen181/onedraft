@@ -3,7 +3,7 @@
 An AI-native desktop app for posting everywhere from one draft.
 Write a post once, let Claude tailor it for each platform, approve it, and OneDraft publishes or
 schedules it everywhere — YouTube, Bilibili, Rednote, Instagram, TikTok and X built in, and any
-other platform through a plugin or an MCP server.
+other platform through a plugin or an MCP server. Then answer the comments from one Inbox.
 
 ![The post editor: one panel per platform](docs/screenshots/4-editor-rednote.png)
 
@@ -15,12 +15,18 @@ other platform through a plugin or an MCP server.
 - **Posts** opens the editor. The **main post** is shared by every platform; click a platform on the left to
   open its own panel. Fields it hasn't changed follow the main post (*↳ from main*); edit one and it becomes
   *● custom* for that platform only; *↺ use main* puts it back. The right side previews how that platform shows it.
+- **Inbox** gathers the comments on your YouTube, X and Instagram posts. Answer them in place, or let Claude
+  draft replies (✨); nothing is sent until you press *Send reply*. It looks for new ones when you open it and every
+  30 minutes in the background (or only when you ask). TikTok, Bilibili and Rednote don't let apps read comments.
+- **Numbers**: published posts show their views, likes and comments, added up on the Posts list and per platform
+  in the editor (with a *Comments* link to that post's comments).
 - **Calendar** shows the week's scheduled and published posts. **Studio** edits and makes videos.
 
 | | |
 |---|---|
 | ![Chat](docs/screenshots/1-chat.png) | ![Posts](docs/screenshots/2-posts.png) |
 | ![Main post](docs/screenshots/3-editor-main.png) | ![YouTube follows the main post](docs/screenshots/5-editor-youtube.png) |
+| ![Inbox with a reply Claude drafted](docs/screenshots/10-inbox.png) | ![A published post's numbers on YouTube](docs/screenshots/11-post-numbers.png) |
 | ![Calendar](docs/screenshots/7-calendar.png) | ![Settings → Platforms](docs/screenshots/8-settings.png) |
 
 ## Run it
@@ -29,7 +35,7 @@ other platform through a plugin or an MCP server.
 npm install
 npm run dev        # development, with hot reload
 npm run build && npm start   # production build
-npm test           # core tests (validation, publish state machine, media, OAuth, signing)
+npm test           # core tests (validation, publish state machine, inbox, media, OAuth, signing)
 ```
 
 Windows 10/11 with Microsoft Edge (already installed) is all it needs; ffmpeg ships with it.
@@ -58,9 +64,15 @@ encrypted with Windows' own protection (Electron `safeStorage`).
 - **Safe publishing**: the queue never re-sends something a platform may already have (`unconfirmed`),
   backs off on rate limits, and uses the platform's own scheduler when it has one (YouTube, Bilibili,
   Rednote), so your PC can be off at posting time. Otherwise OneDraft keeps running in the tray.
-- **AI-native**: the built-in assistant (Claude) and any MCP client share 25 tools. Drafting, checking rules,
-  converting media (9:16, 3:4, blurred fill…), editing and generating video, and reading comments happen
-  freely; **publishing and replies wait for your click** unless you turn on auto-approve.
+- **AI-native**: the built-in assistant (Claude) and any MCP client share 27 tools. Drafting, checking rules,
+  converting media (9:16, 3:4, blurred fill…), editing and generating video, reading comments and drafting
+  replies (`draft_reply` leaves them in the Inbox) happen freely; **publishing waits for your click** unless you
+  turn on auto-approve, and **replies always do**.
+- **Inbox** (`src/core/inbox.ts`): YouTube and Instagram are read for the whole account; X per post, for posts
+  from the last 7 days (its search window), asking only for replies newer than the last one seen, because X bills
+  every read. Comments that were already two weeks old when first seen are filed as done. Your own replies and
+  thread parts are left out. Each platform's numbers are stored under common names (views, likes, comments,
+  shares, saves) plus its extras (Bilibili coins, X quotes, Instagram reach).
 - **Studio** ([docs/video.md](docs/video.md)): edit your own footage (trim, join, speed, text, burned-in captions,
   music with ducking, logo, crossfades, loudness, one-click silence removal), or have Claude make a video.
   Claude writes it as an HTML animation, OneDraft renders it frame by frame to MP4, and it is always labelled
@@ -77,7 +89,7 @@ encrypted with Windows' own protection (Electron `safeStorage`).
 | Rednote | Nothing — a browser window opens; scan the QR code | Defaults to *handoff*: OneDraft fills the note, you press Publish (Rednote penalises automated accounts). |
 | Instagram | Meta app (Business) → Instagram → *API setup with Instagram login* → generate a token for your Business/Creator account; paste it when connecting | Images need a public media host (Settings; any S3-compatible bucket such as Cloudflare R2). |
 | TikTok | developers.tiktok.com app with Login Kit (Desktop) + Content Posting API; redirect `http://127.0.0.1:53682/callback/` | Until TikTok audits the app, posts are private and the account must be private. |
-| X | console.x.com app, OAuth 2.0 type **Native App**, callback `http://127.0.0.1:53682/callback` | Pay-per-use: ~$0.015/post, ~$0.20 with a link. |
+| X | console.x.com app, OAuth 2.0 type **Native App**, callback `http://127.0.0.1:53682/callback` | Pay-per-use: ~$0.015/post, ~$0.20 with a link; reading a reply ~$0.005 (the Inbox reads each one once). |
 
 Research behind these choices: [docs/platform-research-2026-11.md](docs/platform-research-2026-11.md).
 
@@ -113,9 +125,9 @@ few lines of JSON. [examples/bluesky-plugin](examples/bluesky-plugin/index.js) i
 
 ```
 src/shared/      types shared by UI and main process
-src/core/        store (node:sqlite), engine (publish state machine), validation, media + edit (ffmpeg), studio, OAuth, tools
+src/core/        store (node:sqlite), engine (publish state machine), inbox (comments + numbers), validation, media + edit (ffmpeg), studio, OAuth, tools
 src/connectors/  youtube, bilibili, rednote, instagram, tiktok, x, mcp-bridge, plugin loader
 src/main/        Electron main: IPC, browser profiles, AI agent, MCP server, HTML-to-video composer, Windows voices, tray
-src/renderer/    React UI: Chat, Posts + post editor (platform panels), Calendar, Studio, Settings
+src/renderer/    React UI: Chat, Posts + post editor (platform panels), Inbox, Calendar, Studio, Settings
 test/            vitest suite
 ```

@@ -6,6 +6,7 @@ import { basename, join } from 'node:path'
 import { z } from 'zod'
 import { detectScenes, detectSilences, evenTimes, extractFrames, speechSegments } from './edit'
 import type { Engine } from './engine'
+import { Inbox } from './inbox'
 import { coverFrame, fit, probe } from './media'
 import type { Studio } from './studio'
 import type { Post, Target } from '../shared/types'
@@ -30,6 +31,8 @@ export function splitImages(result: unknown): { data: unknown; images: ToolImage
 export interface ToolEnv {
   engine: Engine
   studio?: Studio
+  /** The app's Inbox (comments and stats). Tools make a throwaway one when it's missing (tests). */
+  inbox?: Inbox
   mediaDir: string
   /** Ask the person in the app. Resolves true if they approve. */
   requestApproval(req: { title: string; detail: string; source: 'agent' | 'mcp' }): Promise<boolean>
@@ -91,6 +94,8 @@ function describeTarget(engine: Engine, post: Post, t: Target): string {
     .filter(Boolean)
     .join('\n')
 }
+
+const inboxOf = (env: ToolEnv) => env.inbox ?? new Inbox(env.engine)
 
 function summarizePost(engine: Engine, id: string) {
   const p = engine.mustPost(id)
@@ -487,19 +492,68 @@ Pass projectId to change an existing generated video. Rendering takes about 2 s 
     }
   }),
   def({
+    name: 'list_inbox',
+    description:
+      "Comments waiting in the person's OneDraft Inbox (already fetched from the platforms), newest first: who wrote what, on which post, and any draft reply. state 'open' = still to answer.",
+    schema: z.object({
+      state: z.enum(['open', 'done', 'replied', 'all']).default('open'),
+      platform: z.string().optional(),
+      limit: z.number().int().min(1).max(200).default(30)
+    }),
+    async run({ state, platform, limit }, { engine }) {
+      const accounts = new Map(engine.store.listAccounts().map((a) => [a.id, a]))
+      return engine.store
+        .listComments({ state: state === 'all' ? undefined : state, limit: platform ? 500 : limit })
+        .filter((c) => !platform || c.platform === platform)
+        .slice(0, limit)
+        .map((c) => {
+          const post = c.postId ? engine.store.getPost(c.postId) : undefined
+          return {
+            accountId: c.accountId,
+            commentId: c.id,
+            platform: c.platform,
+            account: accounts.get(c.accountId)?.name,
+            author: c.author,
+            text: c.text,
+            publishedAt: c.publishedAt,
+            onPost: post ? post.title || post.body.slice(0, 80) : c.postRemoteId ? `a post outside OneDraft (${c.postRemoteId})` : undefined,
+            state: c.state,
+            draft: c.draft,
+            reply: c.reply?.text
+          }
+        })
+    }
+  }),
+  def({
     name: 'list_comments',
-    description: "Read recent comments on an account's posts (or one post via remoteId) where the platform allows it.",
+    description: "Read recent comments on an account's posts (or one post via remoteId) live from the platform, where it allows it. They are added to the Inbox.",
     schema: z.object({ accountId: z.string(), remoteId: z.string().optional(), limit: z.number().int().optional() }),
-    async run({ accountId, remoteId, limit }, { engine }) {
+    async run({ accountId, remoteId, limit }, env) {
+      const { engine } = env
       const a = engine.mustAccount(accountId)
       const c = engine.connector(a.platform)
       if (!c.listComments) return { error: `${c.manifest.name} comments are not available through OneDraft.` }
-      return c.listComments(engine.makeContext(a.platform, a, a.id), a, { remoteId, limit })
+      const list = (await c.listComments(engine.makeContext(a.platform, a, a.id), a, { remoteId, limit })) ?? []
+      inboxOf(env).save(a, list.map((x) => ({ ...x, postRemoteId: x.postRemoteId ?? remoteId })))
+      return list
+    }
+  }),
+  def({
+    name: 'draft_reply',
+    description:
+      "Save a suggested reply to a comment in the person's Inbox WITHOUT sending it. They read it, change it if they like, and send it from the Inbox. Use this whenever you are asked to draft or suggest replies.",
+    schema: z.object({ accountId: z.string(), commentId: z.string(), text: z.string().min(1) }),
+    async run({ accountId, commentId, text }, { engine }) {
+      const key = `${accountId}:${commentId}`
+      const comment = engine.store.getComment(key)
+      if (!comment) throw new Error('That comment is not in the Inbox. Find it with list_inbox (or list_comments first).')
+      engine.store.setCommentDraft(key, text, 'claude')
+      return { saved: true, note: 'The person sends it from the Inbox.' }
     }
   }),
   def({
     name: 'reply_comment',
-    description: 'Reply to a comment. The person must confirm the exact text in OneDraft first.',
+    description: 'Send a reply to a comment now. The person must confirm the exact text in OneDraft first. To only suggest a reply, use draft_reply.',
     schema: z.object({ accountId: z.string(), commentId: z.string(), remoteId: z.string().optional(), text: z.string().min(1) }),
     async run({ accountId, commentId, remoteId, text }, env) {
       const a = env.engine.mustAccount(accountId)
@@ -507,20 +561,30 @@ Pass projectId to change an existing generated video. Rendering takes about 2 s 
       if (!c.reply) return { error: `${c.manifest.name} replies are not available through OneDraft.` }
       const ok = await env.requestApproval({ title: `Reply on ${c.manifest.name} as ${a.name}?`, detail: text, source: env.source })
       if (!ok) return { sent: false, message: 'The person declined.' }
+      // A comment in the Inbox gets marked as answered there.
+      const key = `${accountId}:${commentId}`
+      if (env.engine.store.getComment(key)) return { sent: true, id: (await inboxOf(env).reply(key, text)).reply?.id }
       return { sent: true, ...(await c.reply(env.engine.makeContext(a.platform, a, a.id), a, { commentId, remoteId, text })) }
     }
   }),
   def({
     name: 'get_stats',
-    description: 'Get view/like/comment numbers for a published target.',
+    description: 'Get fresh numbers for a published target: views, likes, comments, shares, saves, plus platform extras (coins, quotes, reach).',
     schema: z.object({ targetId: z.string() }),
-    async run({ targetId }, { engine }) {
-      const t = engine.store.getTarget(targetId)
-      if (!t?.remoteId) return { error: 'Not published yet (no remote id).' }
-      const a = engine.mustAccount(t.accountId)
-      const c = engine.connector(a.platform)
-      if (!c.stats) return { error: `${c.manifest.name} stats are not available.` }
-      return c.stats(engine.makeContext(a.platform, a, a.id), a, t.remoteId)
+    async run({ targetId }, env) {
+      const t = env.engine.store.getTarget(targetId)
+      if (!t) throw new Error(`Unknown target ${targetId}`)
+      if (!t.remoteId) return { error: 'Not published yet (no remote id).' }
+      const inbox = inboxOf(env)
+      if (!inbox.hasStats(t)) {
+        const name = env.engine.registry.has(t.platform) ? env.engine.connector(t.platform).manifest.name : t.platform
+        return { error: t.status === 'scheduled' ? 'Not live yet: it is scheduled on the platform.' : `${name} stats are not available.` }
+      }
+      await inbox.refreshStats([targetId])
+      const s = env.engine.store.getStats(targetId)
+      if (!s) return { error: 'No numbers yet; try again in a moment.' }
+      if (s.error) return { error: s.error, ...(Object.keys(s.metrics).length ? { lastKnown: s.metrics, lastFetchedAt: s.fetchedAt } : {}) }
+      return { ...s.metrics, fetchedAt: s.fetchedAt }
     }
   }),
   def({

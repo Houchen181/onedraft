@@ -3,8 +3,9 @@
 // for that platform only, and "use main" puts it back.
 
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import type { Account, Issue, MediaInfo, PlatformManifest, Post, PostDraft, Target, Variant } from '@shared/types'
+import type { Account, Issue, MediaInfo, PlatformManifest, Post, PostDraft, Target, TargetStats, Variant } from '@shared/types'
 import { call, fileName, isVideoPath, mediaUrl, on } from '../api'
+import { canHaveStats, isLive, TargetStatsStrip, useStats } from '../stats'
 import { ConnectDialog, Counter, Field, MediaTile, PlatformIcon, Status, TagsInput, Toggle, useApp } from '../ui'
 
 interface Main {
@@ -60,6 +61,7 @@ export function PostEditor({ postId: initialId, seedMedia, onCreated }: { postId
   const [saving, setSaving] = useState<'idle' | 'saving' | 'saved'>('idle')
   const [connectP, setConnectP] = useState<PlatformManifest>()
   const [progress, setProgress] = useState<{ fraction: number; note?: string }>()
+  const { stats } = useStats()
   const dirty = useRef(false)
   const lastSaved = useRef<string | undefined>(undefined)
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -442,6 +444,7 @@ export function PostEditor({ postId: initialId, seedMedia, onCreated }: { postId
               issues={current.account ? (issues[current.account.id] ?? []) : []}
               infos={infos}
               progress={current.target?.status === 'publishing' ? progress : undefined}
+              stats={current.target ? stats.get(current.target.id) : undefined}
               onChange={(patch) => current.account && setVariant(current.account.id, patch)}
               onInclude={() => toggle(current, true)}
               onConnect={() => setConnectP(current.p)}
@@ -617,6 +620,7 @@ function PlatformPanel(props: {
   issues: Issue[]
   infos: Record<string, MediaInfo>
   progress?: { fraction: number; note?: string }
+  stats?: TargetStats
   onChange: (patch: Partial<Variant>) => void
   onInclude: () => void
   onConnect: () => void
@@ -698,6 +702,11 @@ function PlatformPanel(props: {
               Open on {p.name} ↗
             </a>
           )}
+          {p.capabilities.comments && isLive(t) && (
+            <a href="#" onClick={() => app.go('inbox', t.postId)}>
+              Comments
+            </a>
+          )}
           <span className="grow small muted">{t.error}</span>
           {t.status === 'failed' && (
             <button className="btn sm" onClick={() => props.onTarget(() => call('targets.retry', t.id), 'Retrying.')}>
@@ -730,6 +739,7 @@ function PlatformPanel(props: {
               <div className="small faint">{props.progress.note}</div>
             </div>
           )}
+          {canHaveStats(t, p) && <TargetStatsStrip target={t} platform={p} stats={props.stats} />}
         </div>
       )}
       <fieldset disabled={row.locked} style={{ border: 0, padding: 0, margin: 0 }}>

@@ -92,6 +92,21 @@ exports.connector = {
 `ctx` also gives you `setting(key)`, `globalSetting(key)`, `log()`, `progress()`, `oauthLoopback()` (PKCE +
 loopback redirect), `exec()` (run a CLI) and `paths`.
 
+### Comments and numbers (optional)
+
+Implement these and set `comments`, `reply` and `stats` in `capabilities`; the Inbox and the post numbers pick
+them up.
+
+- `listComments(ctx, account, { remoteId, limit, sinceId })` returns `{ id, author, text, publishedAt, likeCount,
+  replyCount, postRemoteId, url, mine }[]`. Without `remoteId` it is called once for the whole account. If your
+  platform can only list one post's comments, declare `capabilities.commentsPerPost: { days: N }` and OneDraft
+  asks for each post published through it in the last N days. `sinceId` is the newest comment OneDraft has seen
+  on that post; if the platform bills reads, return only newer ones. Set `mine: true` on the account's own
+  comments so they stay out of the Inbox.
+- `reply(ctx, account, { commentId, remoteId, text })` returns `{ id }`. It only ever runs on the person's click.
+- `stats(ctx, account, remoteId)` returns numbers under any names; `views`, `likes`, `comments`, `shares` and
+  `saves` (or the usual spellings like `view_count`, `likeCount`) are shown as those, anything else as is.
+
 ## 3. Built-in connector
 
 Add `src/connectors/<id>.ts`, register it in `src/connectors/index.ts`, and add tests.

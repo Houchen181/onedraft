@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { Account, ApprovalRequest, PlatformManifest, Post } from '@shared/types'
+import type { Account, ApprovalRequest, InboxStatus, PlatformManifest, Post } from '@shared/types'
 import { call, on, useData } from './api'
 import { Calendar } from './pages/Calendar'
 import { Chat } from './pages/Chat'
+import { Inbox } from './pages/Inbox'
 import { PostEditor } from './pages/PostEditor'
 import { Posts } from './pages/Posts'
 import { Settings } from './pages/Settings'
@@ -12,13 +13,16 @@ import { Ctx, Modal, type AppCtx, type Page } from './ui'
 const NAV: [Page, string, string][] = [
   ['chat', '✦', 'Chat'],
   ['posts', '✎', 'Posts'],
+  ['inbox', '✉', 'Inbox'],
   ['calendar', '▦', 'Calendar'],
   ['studio', '▶', 'Studio']
 ]
+const PAGES: Page[] = ['chat', 'posts', 'post', 'inbox', 'calendar', 'studio', 'settings']
 
 export function App() {
   const [page, setPage] = useState<Page>('chat')
   const [postId, setPostId] = useState<string>()
+  const [inboxPost, setInboxPost] = useState<string>()
   const [postKey, setPostKey] = useState(0)
   const [seedMedia, setSeedMedia] = useState<string[]>()
   const [studioSeed, setStudioSeed] = useState<string>()
@@ -30,10 +34,21 @@ export function App() {
   const { data: accounts } = useData<Account[]>('accounts.list', [], ['accounts'])
   const { data: posts } = useData<Post[]>('posts.list', [], ['posts'])
   const { data: profile } = useData<{ values: Record<string, unknown> }>('settings.get', [], ['accounts'])
+  const { data: inbox } = useData<InboxStatus>('inbox.status', [], ['inbox', 'accounts'])
 
   const loadPlatforms = useCallback(() => void call<PlatformManifest[]>('platforms').then(setPlatforms), [])
   useEffect(loadPlatforms, [loadPlatforms, page])
   useEffect(() => on('changed', (k) => k === 'platforms' && loadPlatforms()), [loadPlatforms])
+  // A desktop notification was clicked (e.g. new comments): show that page.
+  useEffect(
+    () =>
+      on('navigate', (p) => {
+        if (!PAGES.includes(p as Page) || p === 'post') return
+        setInboxPost(undefined)
+        setPage(p as Page)
+      }),
+    []
+  )
   useEffect(() => {
     // Cards still waiting (e.g. after a reload), new ones as they come, and ones that expired or were answered.
     void call<ApprovalRequest[]>('approvals.list').then((list) => setApprovals((a) => [...a, ...list.filter((r) => !a.some((x) => x.id === r.id))]))
@@ -77,6 +92,7 @@ export function App() {
           setSeedMedia(undefined)
           setPostKey((k) => k + 1)
         }
+        if (p === 'inbox') setInboxPost(id)
         setPage(p)
       },
       ask: (text, opts) => {
@@ -139,6 +155,11 @@ export function App() {
               {label}
               {id === 'chat' && assistantBusy && <span className="pulse" title="Claude is working" />}
               {id === 'posts' && active > 0 && <span className="count">{active}</span>}
+              {id === 'inbox' && (inbox?.open ?? 0) > 0 && (
+                <span className="count new" title={`${inbox!.open} comment${inbox!.open === 1 ? '' : 's'} to answer`}>
+                  {inbox!.open}
+                </span>
+              )}
             </button>
           ))}
           <div className="spacer" />
@@ -150,6 +171,7 @@ export function App() {
           {page === 'chat' && <Chat pending={pendingAsk} onPendingTaken={() => setPendingAsk(undefined)} />}
           {page === 'posts' && <Posts />}
           {page === 'post' && <PostEditor key={postKey} postId={postId} seedMedia={seedMedia} onCreated={setPostId} />}
+          {page === 'inbox' && <Inbox postFilter={inboxPost} onClearFilter={() => setInboxPost(undefined)} />}
           {page === 'calendar' && <Calendar />}
           {page === 'studio' && <Studio seed={studioSeed} onSeedTaken={() => setStudioSeed(undefined)} />}
           {page === 'settings' && <Settings />}

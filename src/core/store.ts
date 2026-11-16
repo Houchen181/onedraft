@@ -3,19 +3,23 @@
 
 import { DatabaseSync } from 'node:sqlite'
 import { randomUUID } from 'node:crypto'
-export type ChangeKind = 'posts' | 'accounts' | 'events' | 'projects'
+export type ChangeKind = 'posts' | 'accounts' | 'events' | 'projects' | 'inbox' | 'stats'
 
 import type {
   Account,
   AccountStatus,
+  Comment,
+  CommentState,
   CompositionSpec,
   EditProject,
   EditSpec,
+  InboxComment,
   LogEvent,
   Post,
   PostDraft,
   PostStatus,
   Target,
+  TargetStats,
   TargetStatus,
   Variant
 } from '../shared/types'
@@ -101,7 +105,47 @@ create table if not exists agent_messages (
   message text not null,
   ts text not null
 );
+create index if not exists targets_remote on targets(account_id, remote_id);
+create table if not exists comments (
+  key text primary key,
+  account_id text not null,
+  platform text not null,
+  comment_id text not null,
+  post_remote_id text,
+  author text not null,
+  text text not null,
+  published_at text,
+  like_count integer,
+  reply_count integer,
+  url text,
+  first_seen_at text not null,
+  updated_at text not null,
+  state text not null default 'open',
+  draft text,
+  draft_by text,
+  reply_text text,
+  reply_id text,
+  replied_at text
+);
+create index if not exists comments_post on comments(account_id, post_remote_id);
+create table if not exists comment_cursors (
+  account_id text not null,
+  post_remote_id text not null,
+  newest_id text not null,
+  newest_at text,
+  primary key (account_id, post_remote_id)
+);
+create table if not exists stats (
+  target_id text primary key,
+  metrics text not null default '{}',
+  fetched_at text not null,
+  error text
+);
 `
+
+/** Comments joined to the OneDraft post they are on (if it went out through OneDraft). */
+const COMMENT_SELECT = `select c.*, t.id as target_id, t.post_id as post_id from comments c
+  left join targets t on t.rowid = (select t2.rowid from targets t2 where t2.account_id = c.account_id and t2.remote_id = c.post_remote_id limit 1)`
 
 const now = () => new Date().toISOString()
 const json = (v: unknown) => JSON.stringify(v ?? null)
@@ -183,8 +227,14 @@ export class Store {
     avatarUrl?: string
     meta?: Record<string, unknown>
   }): Account {
-    const existing = this.db.prepare('select id from accounts where platform = ? order by created_at limit 1').get(a.platform) as Row | undefined
+    const existing = this.db.prepare('select id, remote_user_id from accounts where platform = ? order by created_at limit 1').get(a.platform) as Row | undefined
     const id = (existing?.id as string) ?? randomUUID()
+    // Another person's login: the old account's comments are not theirs to answer.
+    if (existing && existing.remote_user_id !== a.remoteUserId) {
+      this.db.prepare('delete from comments where account_id = ?').run(id)
+      this.db.prepare('delete from comment_cursors where account_id = ?').run(id)
+      this.changed('inbox')
+    }
     if (existing) {
       this.db
         .prepare(
@@ -215,7 +265,10 @@ export class Store {
 
   removeAccount(id: string) {
     this.db.prepare('delete from accounts where id = ?').run(id)
+    this.db.prepare('delete from comments where account_id = ?').run(id)
+    this.db.prepare('delete from comment_cursors where account_id = ?').run(id)
     this.changed('accounts')
+    this.changed('inbox')
   }
 
   getAccountSecret<T>(id: string): T | undefined {
@@ -446,9 +499,29 @@ export class Store {
   }
 
   removePost(id: string) {
+    this.db.prepare('delete from stats where target_id in (select id from targets where post_id = ?)').run(id)
     this.db.prepare('delete from targets where post_id = ?').run(id)
     this.db.prepare('delete from posts where id = ?').run(id)
     this.changed('posts')
+    this.changed('stats')
+  }
+
+  /**
+   * Targets live on their platform: published, or scheduled there with the time passed. `since` limits to
+   * ones that went out after that time (their scheduled time, else their last update).
+   */
+  liveTargets(opts: { accountId?: string; since?: Date; limit?: number } = {}): Target[] {
+    const nowIso = now()
+    const rows = this.db
+      .prepare(
+        `select * from targets where remote_id is not null
+         and (status = 'published' or (status = 'scheduled' and scheduled_at is not null and scheduled_at <= ?))
+         and (? is null or account_id = ?)
+         and coalesce(scheduled_at, updated_at) >= ?
+         order by coalesce(scheduled_at, updated_at) desc limit ?`
+      )
+      .all(nowIso, opts.accountId ?? null, opts.accountId ?? null, (opts.since ?? new Date(0)).toISOString(), opts.limit ?? 200) as Row[]
+    return rows.map((r) => this.toTarget(r))
   }
 
   /** Queued targets whose time has come (scheduled time and retry backoff both passed). */
@@ -489,6 +562,196 @@ export class Store {
       scope: (r.scope as string) ?? undefined,
       message: r.message as string
     }))
+  }
+
+  // ---------- inbox ----------
+
+  private toComment(r: Row): InboxComment {
+    const num = (v: unknown) => (v === null || v === undefined ? undefined : Number(v))
+    return {
+      key: r.key as string,
+      id: r.comment_id as string,
+      accountId: r.account_id as string,
+      platform: r.platform as string,
+      author: r.author as string,
+      text: r.text as string,
+      publishedAt: (r.published_at as string) ?? undefined,
+      likeCount: num(r.like_count),
+      replyCount: num(r.reply_count),
+      postRemoteId: (r.post_remote_id as string) ?? undefined,
+      url: (r.url as string) ?? undefined,
+      postId: (r.post_id as string) ?? undefined,
+      targetId: (r.target_id as string) ?? undefined,
+      firstSeenAt: r.first_seen_at as string,
+      state: r.state as CommentState,
+      draft: (r.draft as string) ?? undefined,
+      draftBy: (r.draft_by as InboxComment['draftBy']) ?? undefined,
+      reply: r.reply_text ? { text: r.reply_text as string, at: r.replied_at as string, id: (r.reply_id as string) ?? undefined } : undefined
+    }
+  }
+
+  /**
+   * Save comments a platform returned. New ones start 'open', or 'done' if they were already older than
+   * `oldAfterDays` when OneDraft first saw them (so connecting an account doesn't bury you in old comments).
+   * Known ones get fresh text and counts but keep their state, draft and reply. Returns the new ones.
+   */
+  saveComments(account: { id: string; platform: string }, comments: Comment[], opts: { oldAfterDays?: number; at?: Date } = {}): InboxComment[] {
+    const at = opts.at ?? new Date()
+    const ts = at.toISOString()
+    const oldBefore = at.getTime() - (opts.oldAfterDays ?? 14) * 86400_000
+    const added: string[] = []
+    const str = (v: unknown) => (v === undefined || v === null || v === '' ? null : String(v))
+    const int = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : null)
+    this.db.exec('begin')
+    try {
+      for (const c of comments) {
+        if (!c || c.id === undefined || c.id === null || c.id === '') continue
+        const key = `${account.id}:${c.id}`
+        const published = str(c.publishedAt)
+        if (this.db.prepare('select 1 from comments where key = ?').get(key)) {
+          this.db
+            .prepare(
+              `update comments set author = ?, text = ?, published_at = coalesce(?, published_at), like_count = ?, reply_count = ?,
+               post_remote_id = coalesce(?, post_remote_id), url = coalesce(?, url), updated_at = ? where key = ?`
+            )
+            .run(str(c.author) ?? 'someone', String(c.text ?? ''), published, int(c.likeCount), int(c.replyCount), str(c.postRemoteId), str(c.url), ts, key)
+          continue
+        }
+        const when = published ? new Date(published).getTime() : NaN
+        const state: CommentState = Number.isFinite(when) && when < oldBefore ? 'done' : 'open'
+        this.db
+          .prepare(
+            `insert into comments (key, account_id, platform, comment_id, post_remote_id, author, text, published_at, like_count, reply_count, url, first_seen_at, updated_at, state)
+             values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(key, account.id, account.platform, String(c.id), str(c.postRemoteId), str(c.author) ?? 'someone', String(c.text ?? ''), published, int(c.likeCount), int(c.replyCount), str(c.url), ts, ts, state)
+        added.push(key)
+      }
+      this.db.exec('commit')
+    } catch (e) {
+      this.db.exec('rollback')
+      throw e
+    }
+    if (comments.length) this.changed('inbox')
+    return added.map((k) => this.getComment(k)!).filter(Boolean)
+  }
+
+  getComment(key: string): InboxComment | undefined {
+    const r = this.db.prepare(`${COMMENT_SELECT} where c.key = ?`).get(key) as Row | undefined
+    return r ? this.toComment(r) : undefined
+  }
+
+  /** Newest first (by when it was written, else when OneDraft first saw it). */
+  listComments(opts: { limit?: number; accountId?: string; state?: CommentState } = {}): InboxComment[] {
+    const rows = this.db
+      .prepare(
+        `${COMMENT_SELECT} where (? is null or c.account_id = ?) and (? is null or c.state = ?)
+         order by coalesce(c.published_at, c.first_seen_at) desc, c.first_seen_at desc limit ?`
+      )
+      .all(opts.accountId ?? null, opts.accountId ?? null, opts.state ?? null, opts.state ?? null, opts.limit ?? 500) as Row[]
+    return rows.map((r) => this.toComment(r))
+  }
+
+  countOpenComments(): number {
+    return Number((this.db.prepare(`select count(*) as n from comments where state = 'open'`).get() as Row).n)
+  }
+
+  /**
+   * The newest comment seen on one post (the account's own included, though those aren't kept), so a platform
+   * can return only newer ones next time.
+   */
+  commentCursor(accountId: string, postRemoteId: string): string | undefined {
+    const r = this.db.prepare('select newest_id from comment_cursors where account_id = ? and post_remote_id = ?').get(accountId, postRemoteId) as Row | undefined
+    return (r?.newest_id as string) ?? undefined
+  }
+
+  /** Move a post's cursor to the newest of these comments, if it is newer than the one saved. */
+  advanceCommentCursor(accountId: string, postRemoteId: string, comments: Comment[]) {
+    // Newer = later time; same or unknown time = the longer, then larger id (X's ids grow over time).
+    const newer = (a: { id: string; at?: string | null }, b: { id: string; at?: string | null }) => {
+      const ta = a.at ? Date.parse(a.at) : NaN
+      const tb = b.at ? Date.parse(b.at) : NaN
+      if (Number.isFinite(ta) && Number.isFinite(tb) && ta !== tb) return ta > tb
+      return a.id.length !== b.id.length ? a.id.length > b.id.length : a.id > b.id
+    }
+    let best: { id: string; at?: string | null } | undefined
+    for (const c of comments) {
+      if (c?.id === undefined || c.id === null || c.id === '') continue
+      const cand = { id: String(c.id), at: c.publishedAt ?? null }
+      if (!best || newer(cand, best)) best = cand
+    }
+    if (!best) return
+    const cur = this.db.prepare('select newest_id, newest_at from comment_cursors where account_id = ? and post_remote_id = ?').get(accountId, postRemoteId) as Row | undefined
+    if (cur && !newer(best, { id: cur.newest_id as string, at: cur.newest_at as string | null })) return
+    this.db
+      .prepare(
+        `insert into comment_cursors (account_id, post_remote_id, newest_id, newest_at) values (?, ?, ?, ?)
+         on conflict(account_id, post_remote_id) do update set newest_id = excluded.newest_id, newest_at = excluded.newest_at`
+      )
+      .run(accountId, postRemoteId, best.id, best.at ?? null)
+  }
+
+  setCommentDraft(key: string, draft: string | undefined, by: 'you' | 'claude' = 'you') {
+    const text = draft?.trim() ? draft : null
+    this.db.prepare('update comments set draft = ?, draft_by = ? where key = ?').run(text, text ? by : null, key)
+    this.changed('inbox')
+  }
+
+  setCommentState(keys: string[], state: 'open' | 'done') {
+    const update = this.db.prepare('update comments set state = ? where key = ?')
+    this.db.exec('begin')
+    try {
+      for (const k of keys) update.run(state, k)
+      this.db.exec('commit')
+    } catch (e) {
+      this.db.exec('rollback')
+      throw e
+    }
+    this.changed('inbox')
+  }
+
+  recordReply(key: string, reply: { text: string; id?: string; at?: string }) {
+    this.db
+      .prepare(`update comments set state = 'replied', reply_text = ?, reply_id = ?, replied_at = ?, draft = null, draft_by = null where key = ?`)
+      .run(reply.text, reply.id ?? null, reply.at ?? now(), key)
+    this.changed('inbox')
+  }
+
+  // ---------- stats ----------
+
+  private toStats(r: Row): TargetStats {
+    return {
+      targetId: r.target_id as string,
+      metrics: parse<Record<string, number>>(r.metrics, {}),
+      fetchedAt: r.fetched_at as string,
+      error: (r.error as string) ?? undefined
+    }
+  }
+
+  /** Save fresh numbers, or (metrics undefined) note a failed refresh and keep the last numbers. */
+  setStats(targetId: string, metrics: Record<string, number> | undefined, error?: string) {
+    if (metrics) {
+      this.db
+        .prepare(
+          `insert into stats (target_id, metrics, fetched_at, error) values (?, ?, ?, null)
+           on conflict(target_id) do update set metrics = excluded.metrics, fetched_at = excluded.fetched_at, error = null`
+        )
+        .run(targetId, json(metrics), now())
+    } else {
+      this.db
+        .prepare(`insert into stats (target_id, metrics, fetched_at, error) values (?, '{}', ?, ?) on conflict(target_id) do update set error = excluded.error`)
+        .run(targetId, now(), error ?? 'Could not read the numbers.')
+    }
+    this.changed('stats')
+  }
+
+  getStats(targetId: string): TargetStats | undefined {
+    const r = this.db.prepare('select * from stats where target_id = ?').get(targetId) as Row | undefined
+    return r ? this.toStats(r) : undefined
+  }
+
+  listStats(): TargetStats[] {
+    return (this.db.prepare('select * from stats').all() as Row[]).map((r) => this.toStats(r))
   }
 
   // ---------- studio projects ----------

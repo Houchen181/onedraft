@@ -141,6 +141,11 @@ export interface Capabilities {
   /** How far ahead the platform accepts a scheduled post, in seconds. */
   scheduleWindow?: { minSec: number; maxSec: number }
   comments: boolean
+  /**
+   * listComments only works one post at a time (remoteId): the Inbox asks for each post published through
+   * OneDraft in the last `days` days. Without it, listComments is called once for the whole account.
+   */
+  commentsPerPost?: { days: number }
   reply: boolean
   stats: boolean
 }
@@ -288,6 +293,58 @@ export interface Comment {
   replyCount?: number
   postRemoteId?: string
   url?: string
+  /** Written by the connected account itself (its own replies and thread parts). Left out of the Inbox. */
+  mine?: boolean
+}
+
+/** 'open' = waiting for an answer; 'done' = nothing to do (dismissed, or old when first seen); 'replied' = answered from OneDraft. */
+export type CommentState = 'open' | 'done' | 'replied'
+
+/** A comment in the Inbox: what the platform returned plus OneDraft's own state. */
+export interface InboxComment extends Comment {
+  /** `${accountId}:${id}` */
+  key: string
+  accountId: string
+  platform: PlatformId
+  /** The OneDraft post (and target) it is on, when that post went out through OneDraft. */
+  postId?: string
+  targetId?: string
+  firstSeenAt: string
+  state: CommentState
+  /** A reply waiting to be sent, written by the person or suggested by Claude. */
+  draft?: string
+  draftBy?: 'you' | 'claude'
+  reply?: { text: string; at: string; id?: string }
+}
+
+/** One account's trouble during the last comment check. */
+export interface InboxProblem {
+  accountId: string
+  platform: PlatformId
+  message: string
+  needsLogin?: boolean
+}
+
+export interface InboxStatus {
+  checking: boolean
+  lastCheckedAt?: string
+  /** Minutes between background checks; 0 = off. */
+  everyMin: number
+  problems: InboxProblem[]
+  /** Comments waiting for an answer. */
+  open: number
+}
+
+/**
+ * Engagement numbers for one published target, under OneDraft's common names (views, likes, comments,
+ * shares, saves) plus any platform extras (coins, quotes, reach...).
+ */
+export interface TargetStats {
+  targetId: string
+  metrics: Record<string, number>
+  fetchedAt: string
+  /** The last refresh failed; metrics are from the refresh before. */
+  error?: string
 }
 
 export interface SettingsView {

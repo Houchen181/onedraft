@@ -6,6 +6,7 @@ import { call, fileName, isVideoPath, mediaUrl } from './api'
 
 export interface AppCtx {
   toast(text: string, error?: boolean): void
+  /** Open a page. `postId` opens that post (page 'post') or shows only its comments (page 'inbox'). */
   go(page: Page, postId?: string): void
   /** Send a request to the assistant. With `background`, stay on the current page. */
   ask(text: string, opts?: { background?: boolean }): void
@@ -20,7 +21,7 @@ export interface AppCtx {
   accountFor(platform: string): Account | undefined
   assistantBusy: boolean
 }
-export type Page = 'chat' | 'posts' | 'post' | 'calendar' | 'studio' | 'settings'
+export type Page = 'chat' | 'posts' | 'post' | 'inbox' | 'calendar' | 'studio' | 'settings'
 export const Ctx = createContext<AppCtx>(null as unknown as AppCtx)
 export const useApp = () => useContext(Ctx)
 
@@ -298,3 +299,16 @@ export function Modal({ children, onClose }: { children: ReactNode; onClose?: ()
 }
 
 export const fmtTime = (iso?: string) => (iso ? new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '')
+
+/** "just now", "5 min ago", "3 h ago", "2 d ago", then the date. */
+export function timeAgo(iso?: string, now = Date.now()): string {
+  if (!iso) return ''
+  const t = new Date(iso).getTime()
+  if (!Number.isFinite(t)) return ''
+  const s = Math.max(0, Math.round((now - t) / 1000))
+  if (s < 60) return 'just now'
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`
+  if (s < 7 * 86400) return `${Math.floor(s / 86400)} d ago`
+  return new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: new Date(t).getFullYear() === new Date(now).getFullYear() ? undefined : 'numeric' })
+}

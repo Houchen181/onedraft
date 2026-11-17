@@ -1,0 +1,39 @@
+# Windows installer: `npm run dist` → dist/OneDraft-Setup-<version>.exe (one click, per user, no admin).
+appId: app.onedraft.desktop
+productName: OneDraft
+directories:
+  output: dist
+  buildResources: resources
+# The Electron that npm already downloaded (no second download).
+electronDist: node_modules/electron/dist
+# No native modules (the store uses node:sqlite), so nothing to rebuild.
+npmRebuild: false
+files:
+  - out/**
+  - package.json
+  # ffprobe-static ships every platform's binary; keep Windows x64 only.
+  - "!node_modules/ffprobe-static/bin/{darwin,linux}/**"
+  - "!node_modules/ffprobe-static/bin/win32/ia32/**"
+# ffmpeg and ffprobe run as processes, so they must be real files (src/main/index.ts looks in app.asar.unpacked).
+asarUnpack:
+  - node_modules/ffmpeg-static/**
+  - node_modules/ffprobe-static/**
+# Window and tray icon, read from the resources folder (iconPath() in src/main/index.ts).
+extraResources:
+  - from: resources/icon.png
+    to: icon.png
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: resources/icon.png
+nsis:
+  oneClick: true
+  perMachine: false
+  artifactName: OneDraft-Setup-${version}.${ext}
+  shortcutName: OneDraft
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  # Your posts, logins and settings stay in %APPDATA%\OneDraft when you uninstall.
+  deleteAppDataOnUninstall: false
+  include: resources/installer.nsh

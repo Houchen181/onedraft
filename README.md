@@ -1,9 +1,10 @@
 # OneDraft
 
 An AI-native desktop app for posting everywhere from one draft.
-Write a post once, let Claude tailor it for each platform, approve it, and OneDraft publishes or
-schedules it everywhere — YouTube, Bilibili, Rednote, Instagram, TikTok and X built in, and any
-other platform through a plugin or an MCP server. Then answer the comments from one Inbox.
+Bring your footage (or just an idea), let Claude cut it by what you say and caption it, tailor the post for
+each platform, approve it, and OneDraft publishes or schedules it everywhere — YouTube, Bilibili, Rednote,
+Instagram, TikTok and X built in, and any other platform through a plugin or an MCP server. Then answer the
+comments from one Inbox.
 
 ![The post editor: one panel per platform](docs/screenshots/4-editor-rednote.png)
 
@@ -11,7 +12,12 @@ other platform through a plugin or an MCP server. Then answer the comments from 
 
 - **One you, one account per platform.** Connect your YouTube, Rednote, Bilibili, Instagram, TikTok and X in
   Settings → Platforms. Signing in with a different account replaces the old one.
-- **Chat** is home: ask Claude for a post, an edit or a new video. Nothing goes out until you approve.
+- **Chat** is home: ask Claude for a post, an edit or a new video ("cut the ums and retakes from this, make a
+  45-second vertical version with captions, and post it to TikTok and Rednote"). Nothing goes out until you approve.
+- **Studio** edits your own videos by what is said: transcribe a clip (Whisper, on your PC), then delete words in
+  the text, drop filler words and shorten pauses, fix misheard words, and add word-by-word captions. The preview
+  plays the whole edit (cuts, captions, text, shape) before you render, with a timeline strip, split at the
+  playhead (S), undo (Ctrl+Z) and the usual playback keys. Claude does the same from Chat.
 - **Posts** opens the editor. The **main post** is shared by every platform; click a platform on the left to
   open its own panel. Fields it hasn't changed follow the main post (*↳ from main*); edit one and it becomes
   *● custom* for that platform only; *↺ use main* puts it back. The right side previews how that platform shows it.
@@ -20,16 +26,32 @@ other platform through a plugin or an MCP server. Then answer the comments from 
   30 minutes in the background (or only when you ask). TikTok, Bilibili and Rednote don't let apps read comments.
 - **Numbers**: published posts show their views, likes and comments, added up on the Posts list and per platform
   in the editor (with a *Comments* link to that post's comments).
-- **Calendar** shows the week's scheduled and published posts. **Studio** edits and makes videos.
+- **Calendar** shows the week's scheduled and published posts.
 
 | | |
 |---|---|
 | ![Chat](docs/screenshots/1-chat.png) | ![Posts](docs/screenshots/2-posts.png) |
 | ![Main post](docs/screenshots/3-editor-main.png) | ![YouTube follows the main post](docs/screenshots/5-editor-youtube.png) |
+| ![Studio: the edit plays with word-by-word captions before rendering](docs/screenshots/13-studio-preview.png) | ![Studio: editing a clip by what is said](docs/screenshots/12-studio-transcript.png) |
 | ![Inbox with a reply Claude drafted](docs/screenshots/10-inbox.png) | ![A published post's numbers on YouTube](docs/screenshots/11-post-numbers.png) |
 | ![Calendar](docs/screenshots/7-calendar.png) | ![Settings → Platforms](docs/screenshots/8-settings.png) |
 
-## Run it
+## Install it
+
+```bash
+npm install
+npm run dist       # → dist\OneDraft-Setup-0.1.0.exe
+```
+
+Double-click `OneDraft-Setup-<version>.exe`: it installs for your Windows account (no admin), adds Start-menu and
+desktop shortcuts and opens OneDraft. The installer isn't code-signed, so the first time Windows SmartScreen says
+*Windows protected your PC*: choose **More info → Run anyway**. Installing a newer build replaces the old one and
+keeps your data; uninstalling (Settings → Apps) keeps it too.
+
+To have scheduled posts go out after a restart without opening OneDraft yourself, turn on
+Settings → App → *Start OneDraft in the tray when you sign in to Windows*.
+
+## Run it from source
 
 ```bash
 npm install
@@ -64,19 +86,22 @@ encrypted with Windows' own protection (Electron `safeStorage`).
 - **Safe publishing**: the queue never re-sends something a platform may already have (`unconfirmed`),
   backs off on rate limits, and uses the platform's own scheduler when it has one (YouTube, Bilibili,
   Rednote), so your PC can be off at posting time. Otherwise OneDraft keeps running in the tray.
-- **AI-native**: the built-in assistant (Claude) and any MCP client share 27 tools. Drafting, checking rules,
-  converting media (9:16, 3:4, blurred fill…), editing and generating video, reading comments and drafting
-  replies (`draft_reply` leaves them in the Inbox) happen freely; **publishing waits for your click** unless you
-  turn on auto-approve, and **replies always do**.
+- **AI-native**: the built-in assistant (Claude) and any MCP client share 29 tools. Drafting, checking rules,
+  converting media (9:16, 3:4, blurred fill…), transcribing, editing and generating video, reading comments and
+  drafting replies (`draft_reply` leaves them in the Inbox) happen freely; **publishing waits for your click**
+  unless you turn on auto-approve, and **replies always do**.
 - **Inbox** (`src/core/inbox.ts`): YouTube and Instagram are read for the whole account; X per post, for posts
   from the last 7 days (its search window), asking only for replies newer than the last one seen, because X bills
   every read. Comments that were already two weeks old when first seen are filed as done. Your own replies and
   thread parts are left out. Each platform's numbers are stored under common names (views, likes, comments,
   shares, saves) plus its extras (Bilibili coins, X quotes, Instagram reach).
-- **Studio** ([docs/video.md](docs/video.md)): edit your own footage (trim, join, speed, text, burned-in captions,
-  music with ducking, logo, crossfades, loudness, one-click silence removal), or have Claude make a video.
-  Claude writes it as an HTML animation, OneDraft renders it frame by frame to MP4, and it is always labelled
-  AI-generated. Claude can *see* your footage (`view_frames`) to pick highlights and check its own renders.
+- **Studio** ([docs/video.md](docs/video.md)): edit your own footage by what is said — Whisper (whisper.cpp,
+  large-v3-turbo, set up once from Settings, on the GPU when there is an NVIDIA card) writes down every word with
+  its time; deleting words, fillers and pauses becomes cuts on the clip, cut on the frame grid so picture and
+  sound stay in sync, and captions are timed to the words that survive (libass). Also trim, join, speed, text,
+  music with ducking, logo, crossfades and loudness. Or have Claude make a video: it writes it as an HTML
+  animation, OneDraft renders it frame by frame to MP4, and it is always labelled AI-generated. Claude can *read*
+  your footage (`transcribe_video`) and *see* it (`view_frames`) to cut it and pick highlights.
 - **AI labels**: mark a post AI-generated and each connector sets that platform's disclosure
   (`containsSyntheticMedia`, `is_aigc`, `made_with_ai`, `is_ai_generated`, Rednote's AI-content declaration).
 
@@ -124,8 +149,8 @@ few lines of JSON. [examples/bluesky-plugin](examples/bluesky-plugin/index.js) i
 ## Layout
 
 ```
-src/shared/      types shared by UI and main process
-src/core/        store (node:sqlite), engine (publish state machine), inbox (comments + numbers), validation, media + edit (ffmpeg), studio, OAuth, tools
+src/shared/      types and transcript editing (cuts, captions) shared by UI and main process
+src/core/        store (node:sqlite), engine (publish state machine), inbox (comments + numbers), speech (Whisper), validation, media + edit (ffmpeg), studio, OAuth, tools
 src/connectors/  youtube, bilibili, rednote, instagram, tiktok, x, mcp-bridge, plugin loader
 src/main/        Electron main: IPC, browser profiles, AI agent, MCP server, HTML-to-video composer, Windows voices, tray
 src/renderer/    React UI: Chat, Posts + post editor (platform panels), Inbox, Calendar, Studio, Settings

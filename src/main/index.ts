@@ -14,6 +14,7 @@ import { Engine } from '../core/engine'
 import { Inbox } from '../core/inbox'
 import { coverFrame, fit, kindOf, probe, type FitMode } from '../core/media'
 import { Registry } from '../core/registry'
+import { Speech } from '../core/speech'
 import { plainCipher, Store, type Cipher } from '../core/store'
 import { Studio } from '../core/studio'
 import type { ToolEnv } from '../core/tools'
@@ -36,6 +37,11 @@ const primary = app.requestSingleInstanceLock()
 if (!primary) app.quit()
 app.setAppUserModelId('app.onedraft.desktop')
 
+/** "Start OneDraft when you sign in to Windows": the Run entry's name (resources/installer.nsh removes it) and its flag. */
+const LOGIN_ITEM = { name: 'app.onedraft.desktop', args: ['--hidden'] }
+/** Started by Windows at sign-in: stay in the tray. */
+const startHidden = process.argv.includes('--hidden')
+
 const unpacked = (p: string) => p.replace('app.asar', 'app.asar.unpacked')
 const dataRoot = process.env.ONEDRAFT_DATA || app.getPath('userData')
 const paths: Paths = {
@@ -51,6 +57,8 @@ for (const p of Object.values(paths)) mkdirSync(p, { recursive: true })
 let win: BrowserWindow | null = null
 let tray: Tray | null = null
 let quitting = false
+/** The page a window opened from the tray state should show first (e.g. after clicking a comment notification). */
+let startPage: string | undefined
 
 const send = (channel: string, payload: unknown) => {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload)
@@ -101,12 +109,36 @@ async function main() {
   }
   const inbox = new Inbox(engine, { everyMin: inboxEvery, onChange: () => send('changed', 'inbox') })
 
+  // ---- start with Windows (Settings → App) ----
+  // Only the installed app: a dev run would register node_modules' electron.exe, which can't start OneDraft.
+  // Untouched until the setting is chosen, so nothing is written for people who never use it.
+  const applyLoginItem = () => {
+    const on = store.getSetting('app.openAtLogin')
+    if (!app.isPackaged || typeof on !== 'boolean') return
+    try {
+      app.setLoginItemSettings({ openAtLogin: on, name: LOGIN_ITEM.name, args: LOGIN_ITEM.args })
+    } catch (e) {
+      store.log('warn', `Start with Windows: ${(e as Error).message}`)
+    }
+  }
+  applyLoginItem()
+
   // ---- local media for previews and compositions ----
   const mediaHandler = (req: Request) => {
     const p = decodeURIComponent(new URL(req.url).pathname.replace(/^\//, ''))
     if (!kindOf(p) && !/\.(wav|mp3|m4a|aac|ogg|flac)$/i.test(p)) return new Response('not media', { status: 403 })
     return net.fetch(pathToFileURL(p).toString(), { headers: req.headers })
   }
+
+  // ---- speech-to-text (local whisper.cpp, set up on first use) ----
+  const speech = new Speech({
+    dir: join(paths.tools, 'whisper'),
+    cacheDir: join(paths.media, 'transcripts'),
+    media: mediaTools,
+    fetch: net.fetch as unknown as typeof fetch,
+    onChange: () => send('changed', 'speech'),
+    onTranscript: () => send('changed', 'transcripts')
+  })
 
   // ---- studio: video edits and Claude-generated videos ----
   const studio = new Studio(
@@ -119,7 +151,8 @@ async function main() {
       speak,
       voices: listVoices
     },
-    (id, fraction, note) => send('progress', { scope: `project:${id}`, fraction, note })
+    (id, fraction, note) => send('progress', { scope: `project:${id}`, fraction, note }),
+    speech
   )
   engine.isAiMedia = studio.isAiMedia
 
@@ -150,6 +183,7 @@ async function main() {
     engine,
     studio,
     inbox,
+    speech,
     mediaDir: paths.media,
     requestApproval,
     autoApprove: () => store.getSetting('ai.autoApprove') === true,
@@ -241,7 +275,12 @@ async function main() {
   // ---- IPC ----
   const connecting = new Map<string, AbortController>()
   const handlers: Record<string, (...a: never[]) => unknown> = {
-    'app.info': () => ({ version: app.getVersion(), paths, encryption: cipher !== plainCipher }),
+    'app.info': () => ({ version: app.getVersion(), paths, encryption: cipher !== plainCipher, packaged: app.isPackaged }),
+    'app.takePage': () => {
+      const p = startPage
+      startPage = undefined
+      return p
+    },
     platforms: () => registry.manifests(),
     'accounts.list': () => store.listAccounts(),
     'accounts.connect': async (platform: string, input: Record<string, string>) => {
@@ -344,12 +383,22 @@ async function main() {
       if (!Array.isArray(keys) || (state !== 'open' && state !== 'done')) throw new Error('Bad request.')
       store.setCommentState(keys.map(String), state)
     },
+    'speech.status': () => speech.status(),
+    'speech.install': () => speech.install(),
+    'speech.cached': (path: string) => speech.cached(String(path)),
+    'speech.fixWords': (path: string, fixes: [number, string][]) => {
+      if (!Array.isArray(fixes)) throw new Error('Bad request.')
+      return speech.fixWords(String(path), fixes.map(([i, t]) => [Number(i), String(t)] as [number, string]))
+    },
+    'speech.transcribe': (path: string) =>
+      speech.transcribe(String(path), { onProgress: (f) => send('progress', { scope: `transcribe:${path}`, fraction: f, note: 'Listening' }) }),
     'stats.list': () => store.listStats(),
     'stats.refresh': (targetIds?: string[]) => inbox.refreshStats(Array.isArray(targetIds) ? targetIds.map(String) : undefined),
     'settings.get': () => store.allSettings(),
     'settings.set': async (entries: { key: string; value: unknown; secret?: boolean }[]) => {
       for (const e of entries) store.setSetting(e.key, e.value, !!e.secret)
       if (entries.some((e) => e.key.startsWith('inbox.'))) send('changed', 'inbox')
+      if (entries.some((e) => e.key === 'app.openAtLogin')) applyLoginItem()
       if (entries.some((e) => e.key.startsWith('mcp.'))) await syncMcp()
       if (entries.some((e) => e.key === 'mcpBridges')) reloadExtensions()
       applySettings()
@@ -422,10 +471,7 @@ async function main() {
         ? { title: `New comment from ${added[0].author}`, body: added[0].text.slice(0, 200) }
         : { title: `${added.length} new comments`, body: `From ${names.slice(0, 3).join(', ')}${names.length > 3 ? ` and ${names.length - 3} more` : ''}` }
     )
-    n.on('click', () => {
-      showWindow()
-      send('navigate', 'inbox')
-    })
+    n.on('click', () => openPage('inbox'))
     n.show()
   }
   const runBackgroundCheck = () => void backgroundCheck().catch((e: Error) => store.log('warn', `Inbox check: ${e.message}`))
@@ -440,8 +486,9 @@ async function main() {
     6 * 3600_000
   )
 
-  createWindow()
   createTray()
+  // Started by Windows at sign-in: just the tray (unless there's no tray icon to open the window from).
+  if (!startHidden || !tray) createWindow()
 
   app.on('second-instance', showWindow)
   app.on('before-quit', () => {
@@ -511,6 +558,17 @@ function showWindow() {
   if (win?.isMinimized()) win.restore()
   win?.show()
   win?.focus()
+}
+
+/** Show the window on a page. A window that doesn't exist yet (started in the tray) asks for it once loaded. */
+function openPage(page: string) {
+  if (win && !win.isDestroyed()) {
+    showWindow()
+    send('navigate', page)
+  } else {
+    startPage = page
+    showWindow()
+  }
 }
 
 function createTray() {

@@ -75,4 +75,6 @@ The CAC's Measures for Labeling AI-Generated Synthetic Content, in force since 2
 | xiaohongshu-mcp | Platform rules in tool descriptions; agent-native surface |
 | Typefully | Master + per-platform variants; publish needs explicit approval level |
 | biliup | Use its uploader rather than re-implementing UPOS |
+| ChatCut | Edit by transcript (delete words, fillers, pauses); word-timed captions; the agent's edits are ordinary edits you can adjust |
+| OpenCut (classic, MIT) | Play the whole edit before exporting; timeline with playhead and split; undo/redo for every edit; editor keys (Space, J/K/L, S); captions you can correct. The rewrite's plan (editor API, MCP server, headless rendering) matches OneDraft's tools |
 | Weaknesses seen | Temporal too heavy (→ SQLite state machine); unbounded waits (→ timeouts everywhere); selectors rot (→ selectors as data + failure screenshots) |

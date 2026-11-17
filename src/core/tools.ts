@@ -8,7 +8,8 @@ import { detectScenes, detectSilences, evenTimes, extractFrames, speechSegments 
 import type { Engine } from './engine'
 import { Inbox } from './inbox'
 import { coverFrame, fit, probe } from './media'
-import type { Studio } from './studio'
+import type { Studio, Transcriber } from './studio'
+import { isFiller } from '../shared/transcript'
 import type { Post, Target } from '../shared/types'
 import { resolveContent } from './validate'
 
@@ -33,6 +34,8 @@ export interface ToolEnv {
   studio?: Studio
   /** The app's Inbox (comments and stats). Tools make a throwaway one when it's missing (tests). */
   inbox?: Inbox
+  /** Local speech-to-text, once it is set up. */
+  speech?: Transcriber
   mediaDir: string
   /** Ask the person in the app. Resolves true if they approve. */
   requestApproval(req: { title: string; detail: string; source: 'agent' | 'mcp' }): Promise<boolean>
@@ -319,9 +322,46 @@ export const TOOLS: ToolDef[] = [
     }
   }),
   def({
+    name: 'transcribe_video',
+    description:
+      'What is said in a video or audio file, with times (local Whisper on this PC; the first run of a file takes a few seconds per minute, then it is cached). Returns sentences with their word numbers and times, filler words and long pauses; words: true adds every word as [number, text, start, end]. Cut by what is said with those word numbers in edit_video (removeWords, keepWords, removeFillers, maxPauseSec on a clip). Use the text for titles, descriptions, chapters and captions.',
+    schema: z.object({
+      path: z.string(),
+      words: z.boolean().default(false).describe('Include every word with its number and times'),
+      language: z.string().optional().describe("Spoken language like 'en' or 'zh'; default: detect")
+    }),
+    async run({ path, words, language }, { speech }) {
+      if (!speech) return { error: 'Speech-to-text is not available here.' }
+      const t = await speech.transcribe(path, { language })
+      const pauses = t.words.flatMap((w, i) => (i + 1 < t.words.length && t.words[i + 1].start - w.end >= 1 ? [{ afterWord: i, seconds: Math.round((t.words[i + 1].start - w.end) * 10) / 10 }] : []))
+      return {
+        language: t.language,
+        durationSec: t.durationSec,
+        wordCount: t.words.length,
+        sentences: t.segments.map((s) => ({ words: `${s.from}-${s.to - 1}`, start: s.start, end: s.end, text: s.text })),
+        fillerWords: t.words.flatMap((w, i) => (isFiller(w) ? [i] : [])),
+        longPauses: pauses,
+        ...(words ? { words: t.words.map((w, i) => [i, w.text, w.start, w.end]) } : {})
+      }
+    }
+  }),
+  def({
+    name: 'fix_transcript',
+    description:
+      "Correct words Whisper misheard in a file's transcript (names, places, brands, jargon), by word number from transcribe_video: [[12, 'Tofuku-ji'], ...]. Times stay the same; captions and later reads use the fixed words. Fix these before making captions.",
+    schema: z.object({ path: z.string(), words: z.array(z.tuple([z.number().int().min(0), z.string().min(1)])).min(1) }),
+    async run({ path, words }, { speech }) {
+      if (!speech?.fixWords) return { error: 'Speech-to-text is not available here.' }
+      const t = speech.fixWords(path, words)
+      return { fixed: words.length, sentences: t.segments.map((s) => ({ words: `${s.from}-${s.to - 1}`, text: s.text })) }
+    }
+  }),
+  def({
     name: 'edit_video',
     description: `Edit human-shot or existing videos into a new MP4 (the original files are never changed). Pass the whole edit as a spec; it is saved as a Studio project the person can reopen and tweak, then rendered. Spec:
 - clips: [{src, in?, out?, speed?, volume?, mute?, durationSec? (images)}] played in order. Use analyze_video's speechSegments to cut silences, view_frames to choose moments.
+- Cutting by what is said (needs transcribe_video's word numbers, all inclusive ranges): on a clip, removeWords: [[from, to], ...] takes those words out (retakes, mistakes, tangents); keepWords: [[from, to], ...] keeps only those words (highlights, shorts); removeFillers: true drops um/uh/嗯/呃; maxPauseSec: 0.4 shortens every longer pause. They become the clip's cuts (source seconds, also editable directly as cuts: [[start, end], ...]).
+- autoCaptions: {style: highlight (word being said lights up, default) | pop (big, 2–3 words, punchy shorts) | clean | boxed, position: bottom | center | top, maxWords?} burns in captions made from what is said, timed to the finished edit (use instead of captions).
 - aspect: '9:16' | '16:9' | '1:1' | '4:5' | '3:4' (default: the first clip's); fit: blur (default, blurred background) | crop | pad.
 - transitionSec: crossfade between clips (0 = hard cuts).
 - texts: [{text, start, end, position: top|center|bottom, size (fraction of frame height, default 0.045), color '#rrggbb', box}] — times on the OUTPUT timeline.
@@ -342,7 +382,12 @@ Pass projectId to change an existing edit.`,
               durationSec: z.number().optional(),
               speed: z.number().optional(),
               volume: z.number().optional(),
-              mute: z.boolean().optional()
+              mute: z.boolean().optional(),
+              cuts: z.array(z.tuple([z.number(), z.number()])).optional().describe('Stretches to take out, source seconds'),
+              removeWords: z.array(z.tuple([z.number().int(), z.number().int()])).optional().describe('Word number ranges to take out (from transcribe_video)'),
+              keepWords: z.array(z.tuple([z.number().int(), z.number().int()])).optional().describe('Keep only these word number ranges'),
+              removeFillers: z.boolean().optional(),
+              maxPauseSec: z.number().min(0).max(5).optional()
             })
           )
           .min(1),
@@ -365,6 +410,13 @@ Pass projectId to change an existing edit.`,
           )
           .optional(),
         captions: z.array(z.object({ start: z.number(), end: z.number(), text: z.string() })).optional(),
+        autoCaptions: z
+          .object({
+            style: z.enum(['highlight', 'pop', 'clean', 'boxed']).optional(),
+            position: z.enum(['bottom', 'center', 'top']).optional(),
+            maxWords: z.number().int().min(1).max(12).optional()
+          })
+          .optional(),
         music: z.object({ src: z.string(), volume: z.number().optional(), duck: z.boolean().optional() }).optional(),
         logo: z
           .object({
@@ -381,9 +433,18 @@ Pass projectId to change an existing edit.`,
     }),
     async run({ projectId, name, spec }, { studio }) {
       if (!studio) return { error: 'Video editing is not available here.' }
-      const p = studio.saveEdit({ id: projectId, name, spec })
+      const p = studio.saveEdit({ id: projectId, name, spec: await studio.withTranscriptCuts(spec) })
       const { project, info } = await studio.render(p.id)
-      return { projectId: project.id, output: project.output, aiGenerated: project.aiGenerated, durationSec: info.durationSec, width: info.width, height: info.height }
+      const removed = (project.spec?.clips ?? []).reduce((s, c) => s + (c.cuts ?? []).reduce((x, [a, b]) => x + b - a, 0), 0)
+      return {
+        projectId: project.id,
+        output: project.output,
+        aiGenerated: project.aiGenerated,
+        durationSec: info.durationSec,
+        width: info.width,
+        height: info.height,
+        ...(removed ? { cutSeconds: Math.round(removed * 10) / 10 } : {})
+      }
     }
   }),
   def({

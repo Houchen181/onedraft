@@ -7,7 +7,8 @@
 import { spawn } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { basename, extname, join, relative, isAbsolute, parse as parsePath } from 'node:path'
-import type { Caption, EditSpec, MediaInfo } from '../shared/types'
+import type { Caption, EditSpec, MediaInfo, Word } from '../shared/types'
+import { buildAss, captionLines, keptFrames, keptSeconds, placeWords, type ClipPlacement } from '../shared/transcript'
 import { frameFor, hasAudioStream, probe, type MediaTools } from './media'
 import { nameAspect, parseAspect } from './validate'
 
@@ -24,14 +25,31 @@ export const defaultFont = () => FONT_CANDIDATES.find((f) => existsSync(f))
 const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x))
 const num = (x: number) => (Math.round(x * 1000) / 1000).toString()
 
-/** Length a clip occupies on the output timeline. */
-export function clipLength(c: EditSpec['clips'][number], info: MediaInfo): number {
-  if (info.kind === 'image') return Math.max(0.1, c.durationSec ?? 3)
-  const speed = clamp(c.speed ?? 1, 0.25, 4)
+/** A video clip's in and out as rendered: clamped to the file. */
+export function clipBounds(c: EditSpec['clips'][number], info: MediaInfo): { start: number; end: number } {
   const full = info.durationSec ?? 0
   const start = clamp(c.in ?? 0, 0, full)
-  const end = clamp(c.out ?? full, start, full)
-  return (end - start) / speed
+  return { start, end: clamp(c.out ?? full, start, full) }
+}
+
+/** Length a clip occupies on the output timeline (after its cuts and speed). */
+export function clipLength(c: EditSpec['clips'][number], info: MediaInfo, fps = 30): number {
+  if (info.kind === 'image') return Math.max(0.1, c.durationSec ?? 3)
+  const speed = clamp(c.speed ?? 1, 0.25, 4)
+  const { start, end } = clipBounds(c, info)
+  return (c.cuts?.length ? keptSeconds(start, end, c.cuts, fps) : end - start) / speed
+}
+
+/** Where each clip starts on the finished video (crossfades overlap neighbours by the transition length). */
+export function clipStarts(lengths: number[], transitionSec = 0): number[] {
+  const T = lengths.length > 1 && transitionSec > 0 ? Math.min(transitionSec, Math.min(...lengths) / 2) : 0
+  const at: number[] = []
+  let t = 0
+  for (const len of lengths) {
+    at.push(t)
+    t += len - T
+  }
+  return at
 }
 
 export function checkSpec(spec: EditSpec, infos: MediaInfo[]): string[] {
@@ -44,6 +62,7 @@ export function checkSpec(spec: EditSpec, infos: MediaInfo[]): string[] {
       const full = info.durationSec ?? 0
       if ((c.in ?? 0) >= (c.out ?? full)) problems.push(`Clip ${i + 1}: start must be before end.`)
       if ((c.in ?? 0) > full) problems.push(`Clip ${i + 1}: starts after the video ends (${full.toFixed(1)} s).`)
+      if (c.cuts?.length && clipLength(c, info, spec.fps ?? 30) < 0.05) problems.push(`Clip ${i + 1}: everything in it is cut.`)
     }
     if (c.speed !== undefined && (c.speed < 0.25 || c.speed > 4)) problems.push(`Clip ${i + 1}: speed must be 0.25–4.`)
   })
@@ -120,7 +139,10 @@ export function saneSpec(spec: EditSpec): EditSpec {
       ...c,
       in: c.in === undefined ? undefined : Math.max(0, finite(c.in, 0)),
       durationSec: c.durationSec === undefined ? undefined : clamp(finite(c.durationSec, 3), 0.1, 3600),
-      volume: c.volume === undefined ? undefined : clamp(finite(c.volume, 1), 0, 10)
+      volume: c.volume === undefined ? undefined : clamp(finite(c.volume, 1), 0, 10),
+      cuts: Array.isArray(c.cuts)
+        ? c.cuts.filter((x): x is [number, number] => Array.isArray(x) && x.length === 2 && x.every((v) => typeof v === 'number' && Number.isFinite(v)))
+        : undefined
     })),
     texts: spec.texts?.map((t) => ({ ...t, size: t.size === undefined ? undefined : clamp(finite(t.size, 0.045), 0.01, 0.3) })),
     music: spec.music && { ...spec.music, volume: spec.music.volume === undefined ? undefined : clamp(finite(spec.music.volume, 0.25), 0, 4) }
@@ -137,30 +159,47 @@ export interface BuiltEdit {
   height: number
 }
 
-/**
- * Build the ffmpeg command for an edit. `infos` are probes of spec.clips (same order).
- * `fontRef` is the font path as ffmpeg should see it (relative to the work dir, to avoid escaping drive colons).
- */
-export function buildEdit(
-  rawSpec: EditSpec,
-  infos: MediaInfo[],
-  o: { out: string; fontRef: string; graphFile?: string }
-): BuiltEdit {
+const even = (n: number) => Math.max(2, Math.round(n / 2) * 2)
+
+/** The finished video's frame size: the spec's shape (else the first clip's) at its long side. */
+export function outputSize(rawSpec: EditSpec, infos: MediaInfo[]): { width: number; height: number } {
   const spec = saneSpec(rawSpec)
-  const fps = spec.fps ?? 30
   const first = infos.find((i) => i.width && i.height)
   const aspect = spec.aspect ?? (first ? nameAspect(first.width! / first.height!) : '16:9')
   const ratio = parseAspect(aspect) || (first ? first.width! / first.height! : 16 / 9)
   const longSide = spec.longSide ?? 1920
-  const even = (n: number) => Math.max(2, Math.round(n / 2) * 2)
-  const W = ratio >= 1 ? longSide : even(longSide * ratio)
-  const H = ratio >= 1 ? even(longSide / ratio) : longSide
+  return ratio >= 1 ? { width: longSide, height: even(longSide / ratio) } : { width: even(longSide * ratio), height: longSide }
+}
+
+/**
+ * Build the ffmpeg command for an edit. `infos` are probes of spec.clips (same order).
+ * `fontRef` is the font path as ffmpeg should see it (relative to the work dir, to avoid escaping drive colons).
+ * `ass`: captions made from speech (an ASS file's text), burned in with fonts from the work dir's `fonts` folder.
+ */
+export function buildEdit(
+  rawSpec: EditSpec,
+  infos: MediaInfo[],
+  o: { out: string; fontRef: string; graphFile?: string; ass?: string }
+): BuiltEdit {
+  const spec = saneSpec(rawSpec)
+  const fps = spec.fps ?? 30
+  const { width: W, height: H } = outputSize(spec, infos)
   const fit = spec.fit ?? 'blur'
 
   const args: string[] = ['-hide_banner', '-y']
   const graph: string[] = []
   const files: Record<string, string> = {}
-  const lengths = spec.clips.map((c, i) => clipLength(c, infos[i]))
+  const lengths = spec.clips.map((c, i) => clipLength(c, infos[i], fps))
+  // Clips with cuts play only their kept frames. Sound is cut on the same frame grid (one audio frame = one
+  // video frame of samples), so however many cuts there are, picture and sound stay in sync.
+  const kept = spec.clips.map((c, i) => {
+    if (infos[i].kind !== 'video' || !c.cuts?.length) return undefined
+    const { start, end } = clipBounds(c, infos[i])
+    return keptFrames(start, end, c.cuts, fps)
+      .map(([a, b]) => `between(n,${a},${b - 1})`)
+      .join('+')
+  })
+  const samplesPerFrame = Math.round(48000 / fps)
 
   // ---- inputs ----
   spec.clips.forEach((c, i) => {
@@ -191,7 +230,9 @@ export function buildEdit(
     const d = lengths[i]
     const speed = clamp(c.speed ?? 1, 0.25, 4)
     const sameAspect = info.width && info.height ? Math.abs(info.width / info.height - W / H) / (W / H) < 0.01 : false
-    const pre = `[${i}:v]setpts=(PTS-STARTPTS)/${num(info.kind === 'image' ? 1 : speed)},fps=${fps}`
+    const pre = kept[i]
+      ? `[${i}:v]setpts=PTS-STARTPTS,fps=${fps},select='${kept[i]}',setpts=N/(${fps}*${num(speed)}*TB),fps=${fps}`
+      : `[${i}:v]setpts=(PTS-STARTPTS)/${num(info.kind === 'image' ? 1 : speed)},fps=${fps}`
     const post = `setsar=1,format=yuv420p,tpad=stop_mode=clone:stop_duration=1,trim=duration=${num(d)},setpts=PTS-STARTPTS[v${i}]`
     if (sameAspect || fit === 'crop') {
       graph.push(`${pre},scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},${post}`)
@@ -207,7 +248,8 @@ export function buildEdit(
     }
     const fmt = 'aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo'
     if (info.kind === 'video' && info.hasAudio && !c.mute) {
-      graph.push(`[${i}:a]asetpts=PTS-STARTPTS,${atempo(speed)}volume=${num(c.volume ?? 1)},${fmt},apad,atrim=duration=${num(d)}[a${i}]`)
+      const cut = kept[i] ? `aresample=48000,asetnsamples=n=${samplesPerFrame}:p=0,aselect='${kept[i]}',asetpts=N/SR/TB,` : ''
+      graph.push(`[${i}:a]asetpts=PTS-STARTPTS,${cut}${atempo(speed)}volume=${num(c.volume ?? 1)},${fmt},apad,atrim=duration=${num(d)}[a${i}]`)
     } else {
       graph.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${num(d)},${fmt}[a${i}]`)
     }
@@ -266,7 +308,12 @@ export function buildEdit(
     )
   }
   ;(spec.texts ?? []).forEach((t, k) => addText(t.text, t.start, t.end, t.position ?? 'center', t.size ?? 0.045, t.color, t.box ?? false, `t${k}`))
-  ;(spec.captions ?? []).forEach((c, k) => addText(c.text, c.start, c.end, 'bottom', vertical ? 0.032 : 0.042, 'white', true, `cap${k}`))
+  if (o.ass) {
+    files['captions.ass'] = o.ass
+    overlays.push('ass=filename=captions.ass:fontsdir=fonts')
+  } else {
+    ;(spec.captions ?? []).forEach((c, k) => addText(c.text, c.start, c.end, 'bottom', vertical ? 0.032 : 0.042, 'white', true, `cap${k}`))
+  }
   if ((spec.fadeInSec ?? 0) > 0) overlays.push(`fade=t=in:st=0:d=${num(spec.fadeInSec!)}`)
   if ((spec.fadeOutSec ?? 0) > 0) overlays.push(`fade=t=out:st=${num(Math.max(0, total - spec.fadeOutSec!))}:d=${num(spec.fadeOutSec!)}`)
   graph.push(`[${v}]${overlays.length ? overlays.join(',') : 'null'}[vout]`)
@@ -312,6 +359,36 @@ export function fontRefFor(workDir: string, font: string): string {
   return basename(copy)
 }
 
+/** Fonts libass may need for captions: Microsoft YaHei (Latin + Chinese) and its bold. */
+const CAPTION_FONTS = ['C:/Windows/Fonts/msyh.ttc', 'C:/Windows/Fonts/msyhbd.ttc']
+
+/**
+ * The captions of an edit as an ASS file: each clip's transcript words that survive its cuts, placed on the
+ * finished video. `transcriptOf` returns a clip file's words (transcribing it if needed).
+ */
+export async function captionsFor(
+  rawSpec: EditSpec,
+  infos: MediaInfo[],
+  transcriptOf: (src: string) => Promise<Word[] | undefined>
+): Promise<{ ass: string; words: Word[] }> {
+  const spec = saneSpec(rawSpec)
+  const fps = spec.fps ?? 30
+  const lengths = spec.clips.map((c, i) => clipLength(c, infos[i], fps))
+  const at = clipStarts(lengths, spec.transitionSec)
+  const placements: ClipPlacement[] = []
+  for (let i = 0; i < spec.clips.length; i++) {
+    const c = spec.clips[i]
+    const info = infos[i]
+    if (info.kind !== 'video' || !info.hasAudio || c.mute) continue
+    const { start, end } = clipBounds(c, info)
+    placements.push({ clip: c, in: start, out: end, at: at[i], speed: clamp(c.speed ?? 1, 0.25, 4), words: await transcriptOf(c.src) })
+  }
+  const words = placeWords(placements, fps)
+  const lines = captionLines(words, spec.autoCaptions)
+  const font = CAPTION_FONTS.some((f) => existsSync(f)) ? 'Microsoft YaHei' : undefined
+  return { ass: buildAss(lines, { ...spec.autoCaptions, ...outputSize(spec, infos), font }), words }
+}
+
 /** Render an edit. Returns the output's media info. */
 export async function renderEdit(
   tools: MediaTools,
@@ -319,7 +396,8 @@ export async function renderEdit(
   out: string,
   workDir: string,
   onProgress?: (fraction: number) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  extra: { transcriptOf?: (src: string) => Promise<Word[] | undefined> } = {}
 ): Promise<MediaInfo> {
   mkdirSync(workDir, { recursive: true })
   mkdirSync(parsePath(out).dir, { recursive: true })
@@ -335,7 +413,15 @@ export async function renderEdit(
   const font = defaultFont()
   const needsFont = (spec.texts?.length ?? 0) + (spec.captions?.length ?? 0) > 0
   if (needsFont && !font) throw new Error('No font found for text overlays.')
-  const built = buildEdit(spec, infos, { out, fontRef: font ? fontRefFor(workDir, font) : '' })
+  let ass: string | undefined
+  if (spec.autoCaptions) {
+    if (!extra.transcriptOf) throw new Error('Captions from speech need speech-to-text (Settings → Speech-to-text).')
+    ass = (await captionsFor(spec, infos, extra.transcriptOf)).ass
+    const fonts = join(workDir, 'fonts')
+    mkdirSync(fonts, { recursive: true })
+    for (const f of CAPTION_FONTS) if (existsSync(f)) copyFileSync(f, join(fonts, basename(f)))
+  }
+  const built = buildEdit(spec, infos, { out, fontRef: font ? fontRefFor(workDir, font) : '', ass })
   writeFileSync(join(workDir, 'graph.txt'), built.graph)
   for (const [name, text] of Object.entries(built.files)) writeFileSync(join(workDir, name), text)
 

@@ -1,7 +1,19 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import type { Caption, CompositionSpec, EditClip, EditProject, EditSpec, EditText, MediaInfo } from '@shared/types'
+import type { AutoCaptions, Caption, CompositionSpec, EditClip, EditProject, EditSpec, EditText, MediaInfo, SpeechStatus } from '@shared/types'
+import { editSegments, splitClip, toSource } from '@shared/timeline'
+import { keptSeconds, mergeCuts } from '@shared/transcript'
 import { call, fileName, isVideoPath, mediaUrl, on, useData } from '../api'
 import { fmtTime, Modal, useApp } from '../ui'
+import { EditPreview, type PreviewControls } from './EditPreview'
+import { TranscriptPanel } from './Transcript'
+
+const CAPTION_STYLES: [AutoCaptions['style'] | '', string][] = [
+  ['', 'Off'],
+  ['highlight', 'Word by word (the word being said lights up)'],
+  ['pop', 'Pop: big, a few words at a time (shorts)'],
+  ['clean', 'Clean lines'],
+  ['boxed', 'Lines on a dark band']
+]
 
 const ASPECTS = [
   ['', 'Keep original'],
@@ -327,7 +339,7 @@ function clipLen(c: EditClip, info?: MediaInfo) {
   const full = info.durationSec ?? 0
   const a = Math.max(0, Math.min(c.in ?? 0, full))
   const b = Math.max(a, Math.min(c.out ?? full, full))
-  return (b - a) / (c.speed ?? 1)
+  return (c.cuts?.length ? keptSeconds(a, b, c.cuts, 30) : b - a) / (c.speed ?? 1)
 }
 
 function EditEditor({ project, onDeleted }: { project: EditProject; onDeleted: () => void }) {
@@ -339,9 +351,96 @@ function EditEditor({ project, onDeleted }: { project: EditProject; onDeleted: (
   const [busy, setBusy] = useState<string>()
   const [instruction, setInstruction] = useState('')
   const player = useRef<HTMLVideoElement>(null)
+  const preview = useRef<PreviewControls>(null)
+  const [watchRender, setWatchRender] = useState(false)
   const progress = useProgress(project.id)
-  const set = (patch: Partial<EditSpec>) => setSpec((s) => ({ ...s, ...patch }))
-  const setClip = (i: number, patch: Partial<EditClip>) => set({ clips: spec.clips.map((c, k) => (k === i ? { ...c, ...patch } : c)) })
+  const { data: speech } = useData<SpeechStatus>('speech.status', [], ['speech'])
+
+  // ---- undo / redo: every change to the edit (yours, or Claude's) can be taken back ----
+  const specRef = useRef(spec)
+  specRef.current = spec
+  /** The edit as last saved (by us or loaded): tells Claude's changes from our own saves. */
+  const saved = useRef<EditSpec | undefined>(project.spec)
+  const past = useRef<EditSpec[]>([])
+  const future = useRef<EditSpec[]>([])
+  const lastChange = useRef(0)
+  const [, bump] = useState(0)
+  const update = (next: EditSpec) => {
+    const cur = specRef.current
+    if (JSON.stringify(next) === JSON.stringify(cur)) return
+    // Typing in a field makes many changes in a row: one undo step takes them all back.
+    if (Date.now() - lastChange.current > 700) {
+      past.current.push(cur)
+      if (past.current.length > 200) past.current.shift()
+    }
+    lastChange.current = Date.now()
+    future.current = []
+    specRef.current = next
+    setSpec(next)
+  }
+  const undo = () => {
+    const prev = past.current.pop()
+    if (!prev) return
+    future.current.push(specRef.current)
+    lastChange.current = 0
+    specRef.current = prev
+    setSpec(prev)
+    bump((n) => n + 1)
+  }
+  const redo = () => {
+    const next = future.current.pop()
+    if (!next) return
+    past.current.push(specRef.current)
+    lastChange.current = 0
+    specRef.current = next
+    setSpec(next)
+    bump((n) => n + 1)
+  }
+  // The selected clip stays one that exists (after an undo, a delete, or Claude's edit removed some).
+  useEffect(() => {
+    if (sel > 0 && sel >= spec.clips.length) setSel(Math.max(0, spec.clips.length - 1))
+  }, [sel, spec.clips.length])
+  const set = (patch: Partial<EditSpec>) => update({ ...specRef.current, ...patch })
+  const setClip = (i: number, patch: Partial<EditClip>) => set({ clips: specRef.current.clips.map((c, k) => (k === i ? { ...c, ...patch } : c)) })
+
+  /** Split the clip under the playhead in two (S). */
+  const splitAtPlayhead = () => {
+    const files = specRef.current.clips.map((c) => (infos[c.src] ? { durationSec: infos[c.src].durationSec, image: infos[c.src].kind === 'image' } : undefined))
+    const at = toSource(editSegments(specRef.current, files), preview.current?.time() ?? 0)
+    if (!at || infos[at.src]?.kind !== 'video') return app.toast('Put the playhead over a video clip to split it.')
+    const clips = splitClip(specRef.current.clips, at.clip, at.time, infos[at.src]?.durationSec)
+    if (!clips) return app.toast('Too close to the clip’s start or end to split there.')
+    set({ clips })
+    setSel(at.clip + 1)
+  }
+
+  // Keyboard, as in most editors. Typing in a field keeps its keys.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement
+      if (el.closest('input, textarea, select, [contenteditable="true"]')) return
+      const k = e.key.toLowerCase()
+      const ctrl = e.ctrlKey || e.metaKey
+      const act = (fn: () => void) => {
+        e.preventDefault()
+        fn()
+      }
+      if (ctrl && k === 'z' && !e.shiftKey) act(undo)
+      else if (ctrl && (k === 'y' || (k === 'z' && e.shiftKey))) act(redo)
+      else if (ctrl || e.altKey) return
+      else if (k === ' ') act(() => preview.current?.toggle())
+      else if (k === 'k') act(() => preview.current?.pause())
+      else if (k === 'arrowleft' || k === 'j') act(() => preview.current?.nudge(e.shiftKey || k === 'j' ? -5 : -1))
+      else if (k === 'arrowright' || k === 'l') act(() => preview.current?.nudge(e.shiftKey || k === 'l' ? 5 : 1))
+      else if (k === ',') act(() => preview.current?.nudge(-1 / 30))
+      else if (k === '.') act(() => preview.current?.nudge(1 / 30))
+      else if (k === 'home') act(() => preview.current?.seek(0))
+      else if (k === 'end') act(() => preview.current?.seek(preview.current.duration()))
+      else if (k === 's') act(splitAtPlayhead)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  })
 
   useEffect(() => {
     for (const c of spec.clips)
@@ -357,9 +456,14 @@ function EditEditor({ project, onDeleted }: { project: EditProject; onDeleted: (
       on('changed', async (k) => {
         if (k !== 'projects') return
         const p = await call<EditProject>('studio.get', project.id).catch(() => undefined)
-        if (p?.spec && JSON.stringify(p.spec) !== JSON.stringify(project.spec)) setSpec(p.spec)
+        // Only a change someone else saved (Claude): our own saves match what we last saved, and must not undo
+        // edits made since (a render takes a while). Through update(), so Ctrl+Z takes Claude's change back too.
+        if (!p?.spec || JSON.stringify(p.spec) === JSON.stringify(saved.current)) return
+        saved.current = p.spec
+        update(p.spec)
       }),
-    [project.id, project.spec]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [project.id]
   )
 
   const total = useMemo(() => {
@@ -367,7 +471,10 @@ function EditEditor({ project, onDeleted }: { project: EditProject; onDeleted: (
     return Math.max(0, lens.reduce((s, x) => s + x, 0) - Math.max(0, lens.length - 1) * (spec.transitionSec ?? 0))
   }, [spec, infos])
 
-  const save = () => call<EditProject>('studio.saveEdit', { id: project.id, name, spec })
+  const save = () => {
+    saved.current = spec
+    return call<EditProject>('studio.saveEdit', { id: project.id, name, spec })
+  }
   const render = async () => {
     setBusy('Rendering…')
     try {
@@ -393,7 +500,7 @@ function EditEditor({ project, onDeleted }: { project: EditProject; onDeleted: (
       let removed = 0
       for (const c of spec.clips) {
         const info = infos[c.src]
-        if (!info || info.kind !== 'video' || !info.hasAudio || c.in !== undefined || c.out !== undefined) {
+        if (!info || info.kind !== 'video' || !info.hasAudio) {
           next.push(c)
           continue
         }
@@ -402,11 +509,24 @@ function EditEditor({ project, onDeleted }: { project: EditProject; onDeleted: (
           next.push(c)
           continue
         }
-        removed += (info.durationSec ?? 0) - a.speechSegments.reduce((s, x) => s + x.out - x.in, 0)
-        next.push(...a.speechSegments.map((s) => ({ ...c, in: s.in, out: s.out })))
+        // The silences become cuts on the same clip (between the speech segments).
+        const full = info.durationSec ?? 0
+        const lo = c.in ?? 0
+        const hi = c.out ?? full
+        const gaps: [number, number][] = []
+        let cursor = 0
+        for (const s of a.speechSegments) {
+          if (s.in > cursor) gaps.push([cursor, s.in])
+          cursor = Math.max(cursor, s.out)
+        }
+        if (full > cursor) gaps.push([cursor, full])
+        const before = clipLen(c, info)
+        const cut = { ...c, cuts: mergeCuts([...(c.cuts ?? []), ...gaps], lo, hi) }
+        removed += before - clipLen(cut, info)
+        next.push(cut.cuts.length ? cut : c)
       }
       set({ clips: next })
-      app.toast(removed > 0.2 ? `Cut ${removed.toFixed(1)} s of silence.` : 'No long silences found (only untrimmed clips are checked).')
+      app.toast(removed > 0.2 ? `Cut ${removed.toFixed(1)} s of silence.` : 'No long silences found.')
     } catch (e) {
       app.toast((e as Error).message, true)
     } finally {
@@ -432,20 +552,63 @@ function EditEditor({ project, onDeleted }: { project: EditProject; onDeleted: (
           <input type="text" value={name} onChange={(e) => setName(e.target.value)} style={{ fontWeight: 600, fontSize: 15 }} />
           {project.aiGenerated && <span className="pill accent">contains AI video</span>}
         </div>
-        <Output project={project} busy={!!busy} progress={progress} onRender={render} onCancel={() => call('studio.cancel', project.id)} onDelete={onDeleted} extra={<span className="muted small">Length ≈ {total.toFixed(1)} s</span>} />
+        <Output
+          project={project}
+          busy={!!busy}
+          progress={progress}
+          onRender={render}
+          onCancel={() => call('studio.cancel', project.id)}
+          onDelete={onDeleted}
+          video={watchRender}
+          extra={
+            <>
+              <button className="btn ghost sm" disabled={!past.current.length} onClick={undo} title="Undo (Ctrl+Z)">
+                ↶ Undo
+              </button>
+              <button className="btn ghost sm" disabled={!future.current.length} onClick={redo} title="Redo (Ctrl+Y)">
+                ↷ Redo
+              </button>
+              <span className="muted small">Length ≈ {total.toFixed(1)} s</span>
+              {project.output && (
+                <button className="btn ghost sm" onClick={() => setWatchRender((w) => !w)}>
+                  {watchRender ? 'Hide the render' : '▶ Watch the render'}
+                </button>
+              )}
+            </>
+          }
+        />
         {busy && <div className="muted small">{busy}</div>}
+      </div>
+
+      <div className="card">
+        <div className="row" style={{ marginBottom: 8 }}>
+          <h2 className="grow" style={{ margin: 0 }}>
+            Preview
+          </h2>
+          <span className="keys">
+            <kbd>Space</kbd> play · <kbd>←</kbd>
+            <kbd>→</kbd> 1 s · <kbd>J</kbd>
+            <kbd>L</kbd> 5 s · <kbd>S</kbd> split · <kbd>Ctrl</kbd>+<kbd>Z</kbd> undo
+          </span>
+        </div>
+        <EditPreview spec={spec} infos={infos} selected={sel} onSelect={setSel} controls={preview} />
+        <div className="small faint" style={{ marginTop: 6 }}>
+          The edit as it will come out, before rendering (crossfades only show in the render). Click the strip to jump; the selected clip is darker.
+        </div>
       </div>
 
       <div className="card">
         <h2>Ask Claude to edit it</h2>
         <div className="row">
-          <input type="text" value={instruction} onChange={(e) => setInstruction(e.target.value)} placeholder="e.g. make a 30 s vertical highlight with captions, cut the ums, add my logo" />
+          <input type="text" value={instruction} onChange={(e) => setInstruction(e.target.value)} placeholder="e.g. cut the ums, retakes and long pauses, then a 45 s vertical highlight with word-by-word captions" />
           <button
             className="btn"
             disabled={!instruction.trim()}
             onClick={async () => {
               await save()
-              app.ask(`Edit Studio project ${project.id} ("${name}"): ${instruction.trim()}. Use get_project for the current spec, look at the footage with view_frames/analyze_video, then render with edit_video and projectId ${project.id}.`)
+              app.ask(
+                `Edit Studio project ${project.id} ("${name}"): ${instruction.trim()}. Use get_project for the current spec; transcribe_video to read what is said in clips with speech, view_frames/analyze_video to look at the footage; keep existing cuts unless asked. Then render with edit_video and projectId ${project.id}.`
+              )
               setInstruction('')
             }}
           >
@@ -483,6 +646,11 @@ function EditEditor({ project, onDeleted }: { project: EditProject; onDeleted: (
                     <span className="small grow" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {fileName(c.src)}
                     </span>
+                    {!!c.cuts?.length && (
+                      <span className="pill" title="Stretches taken out (edit them under What’s said)">
+                        ✂ {c.cuts.length}
+                      </span>
+                    )}
                     <span className="faint small">{clipLen(c, info).toFixed(1)} s</span>
                     <button className="btn ghost sm" disabled={i === 0} onClick={() => set({ clips: swap(spec.clips, i, i - 1) })}>
                       ↑
@@ -534,6 +702,15 @@ function EditEditor({ project, onDeleted }: { project: EditProject; onDeleted: (
           </div>
         </div>
       </div>
+
+      {clip && infos[clip.src]?.kind === 'video' && (
+        <div className="card">
+          <h2>
+            What’s said <span className="faint small" style={{ fontWeight: 400 }}>· clip {sel + 1}</span>
+          </h2>
+          <TranscriptPanel clip={clip} info={infos[clip.src]} player={player} onCuts={(cuts) => setClip(sel, { cuts: cuts?.length ? cuts : undefined })} />
+        </div>
+      )}
 
       <div className="card">
         <h2>Look &amp; sound</h2>
@@ -627,8 +804,37 @@ function EditEditor({ project, onDeleted }: { project: EditProject; onDeleted: (
         ))}
         {!spec.texts?.length && <div className="muted small">Titles, labels, calls to action. Times are on the finished video.</div>}
         <h3>Captions</h3>
-        <div className="row">
-          <span className="small grow">{spec.captions?.length ? `${spec.captions.length} captions, burned in at the bottom` : 'None'}</span>
+        <div className="split" style={{ marginBottom: 8 }}>
+          <label className="field">
+            <span className="lab">From what is said</span>
+            <select
+              value={spec.autoCaptions?.style ?? ''}
+              onChange={(e) => set({ autoCaptions: e.target.value ? { ...spec.autoCaptions, style: e.target.value as AutoCaptions['style'] } : undefined })}
+            >
+              {CAPTION_STYLES.map(([v, l]) => (
+                <option key={v} value={v}>
+                  {l}
+                </option>
+              ))}
+            </select>
+          </label>
+          {spec.autoCaptions && (
+            <label className="field">
+              <span className="lab">Where</span>
+              <select value={spec.autoCaptions.position ?? 'bottom'} onChange={(e) => set({ autoCaptions: { ...spec.autoCaptions, position: e.target.value as AutoCaptions['position'] } })}>
+                <option value="bottom">Bottom</option>
+                <option value="center">Middle</option>
+                <option value="top">Top</option>
+              </select>
+            </label>
+          )}
+        </div>
+        {spec.autoCaptions && !speech?.installed && <div className="note small">Captions from speech need speech-to-text: set it up under “What’s said” or in Settings.</div>}
+        {spec.autoCaptions && <div className="small faint">Timed to every word, after your cuts. Rendering transcribes clips that haven’t been yet.</div>}
+        <div className="row" style={{ marginTop: 8 }}>
+          <span className="small grow">
+            {spec.captions?.length ? `${spec.captions.length} imported captions${spec.autoCaptions ? ' (not used while captions come from speech)' : ', burned in at the bottom'}` : 'Or import an .srt file'}
+          </span>
           <button className="btn sm" onClick={importSrt}>
             Import .srt
           </button>
@@ -722,12 +928,14 @@ function Output(props: {
   onCancel: () => void
   onDelete: () => void
   extra?: ReactNode
+  /** Show the rendered file's player (default yes; edits show their live preview instead). */
+  video?: boolean
 }) {
   const app = useApp()
   const { project: p, progress } = props
   return (
     <div className="stack" style={{ marginTop: 12 }}>
-      {p.output && (
+      {p.output && props.video !== false && (
         <div className="media" style={{ aspectRatio: 'auto', maxHeight: 460, background: '#000' }}>
           <video
             key={p.output + p.updatedAt}

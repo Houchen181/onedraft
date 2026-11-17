@@ -39,16 +39,16 @@ export function App() {
   const loadPlatforms = useCallback(() => void call<PlatformManifest[]>('platforms').then(setPlatforms), [])
   useEffect(loadPlatforms, [loadPlatforms, page])
   useEffect(() => on('changed', (k) => k === 'platforms' && loadPlatforms()), [loadPlatforms])
-  // A desktop notification was clicked (e.g. new comments): show that page.
-  useEffect(
-    () =>
-      on('navigate', (p) => {
-        if (!PAGES.includes(p as Page) || p === 'post') return
-        setInboxPost(undefined)
-        setPage(p as Page)
-      }),
-    []
-  )
+  // A desktop notification was clicked (e.g. new comments): show that page, also when it opened this window.
+  useEffect(() => {
+    const show = (p: unknown) => {
+      if (!PAGES.includes(p as Page) || p === 'post') return
+      setInboxPost(undefined)
+      setPage(p as Page)
+    }
+    void call<string | undefined>('app.takePage').then(show)
+    return on('navigate', show)
+  }, [])
   useEffect(() => {
     // Cards still waiting (e.g. after a reload), new ones as they come, and ones that expired or were answered.
     void call<ApprovalRequest[]>('approvals.list').then((list) => setApprovals((a) => [...a, ...list.filter((r) => !a.some((x) => x.id === r.id))]))

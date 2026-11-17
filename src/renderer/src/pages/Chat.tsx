@@ -39,7 +39,7 @@ const STEP: Record<string, string> = {
 
 const SUGGESTIONS = [
   'Turn my newest video into posts for every platform I’ve connected.',
-  'Cut a 45-second vertical highlight from a video I pick, with captions.',
+  'Edit my talking video: cut the ums, retakes and long pauses, and add word-by-word captions.',
   'What’s scheduled this week, and is anything failing?',
   'Make a 15-second animated teaser for my next post.'
 ]

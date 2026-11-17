@@ -3,11 +3,22 @@
 
 import { randomUUID } from 'node:crypto'
 import { existsSync, rmSync } from 'node:fs'
-import { join, resolve, sep } from 'node:path'
-import type { CompositionSpec, EditProject, EditSpec, MediaInfo } from '../shared/types'
+import { basename, join, resolve, sep } from 'node:path'
+import { mergeCuts, planCuts, type CutPlan } from '../shared/transcript'
+import type { CompositionSpec, EditClip, EditProject, EditSpec, MediaInfo, Transcript } from '../shared/types'
 import { renderEdit } from './edit'
 import type { MediaTools } from './media'
 import type { Store } from './store'
+
+/** What Studio needs from speech-to-text (src/core/speech.ts). */
+export interface Transcriber {
+  transcribe(path: string, opts?: { language?: string; signal?: AbortSignal; onProgress?: (f: number) => void }): Promise<Transcript>
+  /** Correct misheard words: [word number, new text]. */
+  fixWords?(path: string, fixes: [number, string][]): Transcript
+}
+
+/** A clip as the assistant may write it: cuts given by what is said, turned into `cuts` before saving. */
+export type ClipWithPlan = EditClip & CutPlan
 
 export interface Voice {
   name: string
@@ -40,10 +51,33 @@ export class Studio {
     private tools: MediaTools,
     mediaDir: string,
     private platform: StudioPlatform | undefined,
-    private onProgress: (projectId: string, fraction: number, note?: string) => void = () => undefined
+    private onProgress: (projectId: string, fraction: number, note?: string) => void = () => undefined,
+    private speech?: Transcriber
   ) {
     this.editsDir = join(mediaDir, 'edits')
     this.generatedDir = join(mediaDir, 'generated')
+  }
+
+  /**
+   * Turn cuts given by what is said (removeWords, keepWords, removeFillers, maxPauseSec on a clip) into the
+   * clip's `cuts`, transcribing the clip if needed. Clips without them pass through unchanged.
+   */
+  async withTranscriptCuts(spec: Omit<EditSpec, 'clips'> & { clips: ClipWithPlan[] }): Promise<EditSpec> {
+    const clips: EditClip[] = []
+    for (const c of spec.clips) {
+      const { removeWords, keepWords, removeFillers, maxPauseSec, ...clip } = c
+      if (!removeWords?.length && !keepWords?.length && !removeFillers && maxPauseSec === undefined) {
+        clips.push(clip)
+        continue
+      }
+      if (!this.speech) throw new Error('Cutting by what is said needs speech-to-text (Settings → Speech-to-text).')
+      const t = await this.speech.transcribe(c.src)
+      const clipIn = Math.max(0, c.in ?? 0)
+      const clipOut = Math.min(t.durationSec || Infinity, c.out ?? t.durationSec)
+      const cuts = planCuts(t.words, clipIn, clipOut, { removeWords, keepWords, removeFillers, maxPauseSec })
+      clips.push({ ...clip, cuts: mergeCuts([...(clip.cuts ?? []), ...cuts], clipIn, clipOut) })
+    }
+    return { ...spec, clips }
   }
 
   list() {
@@ -113,8 +147,15 @@ export class Studio {
         if (!p.spec) throw new Error('This project has no edit yet.')
         const ai = p.spec.clips.some((c) => this.isAiMedia(c.src))
         const out = join(ai ? this.generatedDir : this.editsDir, `${slug(p.name)}-${stamp}.mp4`)
+        const speech = this.speech
+        const transcriptOf = speech
+          ? async (src: string) => {
+              this.onProgress(id, 0, `Listening to ${basename(src)}`)
+              return (await speech.transcribe(src, { signal: ac.signal, onProgress: (f) => this.onProgress(id, f, `Listening to ${basename(src)}`) })).words
+            }
+          : undefined
         this.onProgress(id, 0, 'Rendering')
-        info = await renderEdit(this.tools, p.spec, out, work, (f) => this.onProgress(id, f, 'Rendering'), ac.signal)
+        info = await renderEdit(this.tools, p.spec, out, work, (f) => this.onProgress(id, f, 'Rendering'), ac.signal, { transcriptOf })
       } else {
         if (!p.composition) throw new Error('This project has no composition yet.')
         if (!this.platform) throw new Error('Video generation needs the desktop app.')

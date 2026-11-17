@@ -26,11 +26,62 @@ export interface EditClip {
   src: string
   in?: number
   out?: number
+  /**
+   * Stretches taken out from inside [in, out], in seconds of the source file: words deleted from the
+   * transcript, filler words, long pauses. The rest plays back to back.
+   */
+  cuts?: [number, number][]
   /** For images (default 3 s). */
   durationSec?: number
   speed?: number
   volume?: number
   mute?: boolean
+}
+
+/** One spoken word (a character for Chinese and Japanese) and when it was said, in seconds of its file. */
+export interface Word {
+  text: string
+  start: number
+  end: number
+}
+
+/** What is said in a file: its words with times, grouped into sentences. */
+export interface Transcript {
+  path: string
+  language: string
+  durationSec: number
+  words: Word[]
+  /** Sentences: words[from] up to (not including) words[to]. */
+  segments: { from: number; to: number; start: number; end: number; text: string }[]
+  model: string
+  createdAt: string
+}
+
+/**
+ * Burned-in captions made from what is said. clean: white with an outline; boxed: on a dark band;
+ * highlight: the word being said lights up; pop: big, few words at a time, the word being said lights up.
+ */
+export type CaptionStyle = 'clean' | 'boxed' | 'highlight' | 'pop'
+
+export interface AutoCaptions {
+  style?: CaptionStyle
+  position?: 'bottom' | 'center' | 'top'
+  /** Most words on screen at once (default by style). */
+  maxWords?: number
+}
+
+/** Local speech-to-text (whisper.cpp): what is installed and what a setup would download. */
+export interface SpeechStatus {
+  installed: boolean
+  /** The NVIDIA (CUDA) build, or the CPU one. */
+  gpu?: boolean
+  model?: string
+  /** A setup in progress. */
+  installing?: { fraction: number; note: string }
+  /** Last setup failure. */
+  error?: string
+  /** What a setup downloads here: [file, MB]. */
+  downloads: { name: string; mb: number }[]
 }
 
 export interface EditText {
@@ -63,8 +114,10 @@ export interface EditSpec {
   /** Crossfade between clips, seconds (0 = hard cuts). */
   transitionSec?: number
   texts?: EditText[]
-  /** Burned-in captions. */
+  /** Burned-in captions (e.g. from an .srt). */
   captions?: Caption[]
+  /** Captions made from what is said in the clips (their transcripts), word-timed on the finished video. Used instead of `captions`. */
+  autoCaptions?: AutoCaptions
   music?: { src: string; volume?: number; duck?: boolean }
   logo?: { src: string; position?: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'; widthFraction?: number; opacity?: number }
   fadeInSec?: number

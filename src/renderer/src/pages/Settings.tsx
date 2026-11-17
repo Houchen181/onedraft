@@ -1,7 +1,65 @@
 import { useEffect, useState } from 'react'
-import type { FieldSpec, LogEvent, PlatformManifest, SettingsView } from '@shared/types'
+import type { FieldSpec, LogEvent, PlatformManifest, SettingsView, SpeechStatus } from '@shared/types'
 import { call, useData } from '../api'
 import { Avatar, ConnectDialog, Field, PlatformIcon, Status, useApp } from '../ui'
+
+/** Local speech-to-text (Whisper): what's installed, or a one-time setup with its exact downloads. */
+function SpeechCard() {
+  const app = useApp()
+  const { data: st, reload } = useData<SpeechStatus>('speech.status', [], ['speech'])
+  const [busy, setBusy] = useState(false)
+  const install = async () => {
+    setBusy(true)
+    try {
+      await call('speech.install')
+      app.toast('Speech-to-text is ready.')
+    } catch (e) {
+      app.toast((e as Error).message, true)
+    } finally {
+      setBusy(false)
+      reload()
+    }
+  }
+  const mb = st?.downloads.reduce((s, d) => s + d.mb, 0) ?? 0
+  return (
+    <div className="card" id="s-speech">
+      <h2>Speech-to-text</h2>
+      <p className="muted small" style={{ marginTop: 0 }}>
+        Lets Studio and Claude edit videos by what is said (cut filler words, retakes and pauses) and burn in word-by-word captions. It runs Whisper
+        (whisper.cpp, large-v3-turbo) on this computer; your audio is never uploaded.
+      </p>
+      {st?.installed ? (
+        <div className="row">
+          <Status s="connected" />
+          <span className="small muted">
+            {st.gpu ? 'On your NVIDIA graphics card' : 'On the processor'} · {st.model}
+          </span>
+        </div>
+      ) : st?.installing ? (
+        <div>
+          <div className="progress">
+            <div style={{ width: `${Math.round(st.installing.fraction * 100)}%` }} />
+          </div>
+          <div className="small faint" style={{ marginTop: 4 }}>
+            {st.installing.note} · {Math.round(st.installing.fraction * 100)}%
+          </div>
+        </div>
+      ) : (
+        <div className="row wrap">
+          <button className="btn primary" disabled={busy || !st} onClick={() => void install()}>
+            Set up ({mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${mb} MB`} download)
+          </button>
+          <span className="small faint">{st?.downloads.map((d) => `${d.name} (${d.mb} MB)`).join(' + ')}, checked against their published checksums.</span>
+        </div>
+      )}
+      {st?.error && !st.installing && (
+        <div className="issue error" style={{ marginTop: 8 }}>
+          {st.error}
+        </div>
+      )}
+    </div>
+  )
+}
 
 const PROFILE_FIELD: FieldSpec = { key: 'profile.name', label: 'Your name', type: 'text', placeholder: 'Shown at the top of the sidebar' }
 
@@ -91,6 +149,13 @@ const HOST_FIELDS: FieldSpec[] = [
 
 const APP_FIELDS: FieldSpec[] = [
   { key: 'app.runInBackground', label: 'Keep running in the tray when the window closes (so scheduled posts go out)', type: 'boolean', default: true },
+  {
+    key: 'app.openAtLogin',
+    label: 'Start OneDraft in the tray when you sign in to Windows (so scheduled posts go out after a restart)',
+    type: 'boolean',
+    default: false,
+    help: 'For the installed app (npm run dist); a development run can’t start with Windows.'
+  },
   { key: 'app.ffmpegPath', label: 'ffmpeg path (optional)', type: 'path', help: 'Leave empty to use the bundled ffmpeg.' }
 ]
 
@@ -231,6 +296,7 @@ export function Settings() {
         {[
           ['platforms', 'Platforms'],
           ['assistant', 'Assistant'],
+          ['speech', 'Speech-to-text'],
           ['mcp', 'Use from Claude Code'],
           ['media', 'Media host'],
           ['connectors', 'Add a platform'],
@@ -339,6 +405,8 @@ export function Settings() {
           {fields(AI_FIELDS)}
         </div>
       </div>
+
+      <SpeechCard />
 
       <div className="card" id="s-mcp">
         <h2>Use OneDraft from Claude Code or other AI apps (MCP)</h2>

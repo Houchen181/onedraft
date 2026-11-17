@@ -3,6 +3,7 @@
   "productName": "OneDraft",
   "version": "0.1.0",
   "description": "AI-native desktop app for managing social media accounts across platforms",
+  "author": "Houchen181",
   "private": true,
   "main": "./out/main/index.js",
   "type": "commonjs",
@@ -10,6 +11,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "start": "electron-vite preview",
+    "dist": "install-electron && electron-vite build && electron-builder --win --x64 --publish never",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run"
   },
@@ -27,6 +29,7 @@
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^6.3.0",
     "electron": "^45.3.1",
+    "electron-builder": "^26.18.0",
     "electron-vite": "^6.0.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",

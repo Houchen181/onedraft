@@ -4,7 +4,15 @@ import { NeedsLoginError, RetryableError, UnconfirmedError, type Connector, type
 import { check, expiresSoon, form, getJson, HttpError, sleep, type OAuthTokens } from '../core/http'
 import { weightedLength } from '../core/validate'
 import type { Comment } from '../shared/types'
-import { fileSize, isVideo, mimeOf, readChunk, requireSetting, singleFlight, splitThread } from './util'
+import { explain, fileSize, isVideo, mimeOf, readChunk, requireSetting, singleFlight, splitThread } from './util'
+
+/** What usually went wrong when signing in, by the code X answers with. */
+const SIGN_IN_FIXES = {
+  unauthorized_client:
+    'X refused the app type. In the X developer console open your app → Keys & Tokens → User authentication settings → Edit, set Type of App to Native App, save, and press Connect again.',
+  CreditsDepleted: 'Your X API credit balance is empty. Buy credits in the X developer console (Billing → Credits), then press Connect again.',
+  'authorization code': 'X’s sign-in code expired (it lasts 30 seconds). Press Connect again.'
+}
 
 const API = 'https://api.x.com/2'
 const SEGMENT = 4 * 1024 * 1024
@@ -98,20 +106,86 @@ export const x: Connector = {
     settings: [
       {
         key: 'clientId',
-        label: 'OAuth 2.0 client ID',
+        label: 'OAuth 2.0 Client ID',
         type: 'text',
         required: true,
-        help: 'console.x.com → your app → User authentication → type "Native App", callback http://127.0.0.1:53682/callback, scopes tweet.read tweet.write users.read media.write offline.access.'
+        pattern: '^[A-Za-z0-9_-]{30,45}$',
+        mismatch: 'An OAuth 2.0 Client ID is about 34 letters and digits. Copy it from Keys & Tokens → OAuth 2.0 Keys, not the API Key, Bearer Token or Access Token.'
       },
-      { key: 'redirectPort', label: 'Callback port', type: 'number', default: 53682, help: 'Must match the callback URL registered on X.' },
+      {
+        key: 'redirectPort',
+        label: 'Callback port',
+        type: 'number',
+        default: 53682,
+        help: 'Only if another program uses 53682. Change the Callback URI on X to match (http://127.0.0.1:<port>/callback).'
+      },
       { key: 'premium', label: 'Account has X Premium (long posts)', type: 'boolean', default: false }
     ],
+    signIn: 'Your browser opens X. Sign in as the account OneDraft should post as (if X asks) and press **Authorize app**. Then come back here.',
+    guide: {
+      why: 'X only lets apps post through its paid API, and every app needs its own key. You make a developer app of your own, once, and pay X directly for what you post: about $0.015 a post, or $0.20 if it contains a link. OneDraft never sees your card.',
+      need: [
+        'The X account you want to post from, signed in in your web browser',
+        'A credit or debit card: X sells API credits from $5 (about 330 posts) and adds $20 of bonus credit after your first purchase'
+      ],
+      time: 'about 10 minutes',
+      steps: [
+        {
+          text: 'Sign up as an X developer: sign in with your X account, type any **Account Name**, paste the use case below into **Use Case Description**, tick the three agreement boxes and press **Submit**.',
+          link: { label: 'Open the X developer console', url: 'https://console.x.com' },
+          copy: [
+            {
+              label: 'Use case',
+              value:
+                'I use OneDraft, a desktop app on my own computer, to publish my own posts (text, images and videos) to my own X account and to read the replies to them. Nothing is shared, sold or analysed.'
+            }
+          ]
+        },
+        {
+          text: 'Buy credits: in the console’s left menu open **Billing** → **Credits** → **Purchase credits** and buy $5, the minimum. Without credits X refuses every post.',
+          detail: 'You can set a spending limit on the same page.'
+        },
+        {
+          text: 'Make the app: open **Apps** and press **New App** (or open the app the console already made for you). Name it **OneDraft**; if that name is taken, add your handle, like OneDraft-yourname. If a window shows keys, close it: OneDraft doesn’t need those.',
+          copy: [{ label: 'App name', value: 'OneDraft' }]
+        },
+        {
+          text: 'In the app open the **Keys & Tokens** tab, find **User authentication settings** and press **Set up** (or **Edit**). Choose App permissions **Read and write** and Type of App **Native App**. Paste the two addresses below exactly, then press **Save changes**.',
+          detail: 'Leave the other fields (organization, terms of service, privacy policy) empty.',
+          copy: [
+            { label: 'Callback URI / Redirect URL', value: 'http://127.0.0.1:{redirectPort}/callback' },
+            { label: 'Website URL', value: 'https://github.com/Houchen181/onedraft' }
+          ]
+        },
+        {
+          text: 'X now shows your **OAuth 2.0 Client ID** (you can find it again under **Keys & Tokens** → **OAuth 2.0 Keys**). Copy it into the box below.',
+          detail: 'Not the API Key, the Bearer Token or the Access Token. A Native App has no Client Secret.',
+          fields: ['clientId']
+        }
+      ],
+      trouble: [
+        {
+          problem: '“You weren’t able to give access to the App”, or error 415',
+          fix: 'The Callback URI on X must be exactly http://127.0.0.1:{redirectPort}/callback: 127.0.0.1, not localhost, and nothing after “callback”. Fix it under Keys & Tokens → User authentication settings → Edit, save, and press Connect again.'
+        },
+        {
+          problem: '“unauthorized_client”, or X showed you a Client Secret',
+          fix: 'The app type is wrong. Under User authentication settings → Edit set Type of App to Native App, save, and press Connect again.'
+        },
+        { problem: '“CreditsDepleted”, or error 402', fix: 'Your X API credit balance is empty. Buy credits under Billing → Credits, then try again.' },
+        {
+          problem: '“Port {redirectPort} is busy”',
+          fix: 'Another program on this computer (often rclone) uses that port. Close it, or choose another port under Options and change the Callback URI on X to match.'
+        },
+        { problem: 'X shows a blank page instead of “Authorize app”', fix: 'Sign in at x.com in the same browser first, then press Connect again.' }
+      ]
+    },
     connectFields: [],
     options: [
       { key: 'thread', label: 'Split long text into a thread', type: 'boolean', default: true, help: 'Otherwise text over the limit is an error.' }
     ],
     notes: [
-      'X bills per post (about $0.015), and about $0.20 when the post contains a link.',
+      'X bills your developer account: about $0.015 per post, $0.20 per post with a link, and $0.005 for each reply OneDraft reads into the Inbox.',
       'Video limit here is 2 min 20 s (longer needs Premium).'
     ]
   },
@@ -151,12 +225,16 @@ export const x: Connector = {
         body: form({ grant_type: 'authorization_code', code: r.code, redirect_uri: r.redirectUri, code_verifier: r.codeVerifier, client_id: clientId })
       },
       'X token exchange'
-    )
+    ).catch((e) => {
+      throw explain(e, SIGN_IN_FIXES)
+    })
     ctx.secrets.set({ accessToken: tok.access_token, refreshToken: tok.refresh_token, expiresAt: Date.now() + tok.expires_in * 1000, scope: tok.scope })
     const me = await api<{ data: { id: string; name: string; username: string; profile_image_url?: string } }>(
       ctx,
       '/users/me?user.fields=profile_image_url'
-    )
+    ).catch((e) => {
+      throw explain(e, SIGN_IN_FIXES)
+    })
     return {
       name: me.data.name,
       handle: `@${me.data.username}`,
@@ -166,9 +244,11 @@ export const x: Connector = {
     }
   },
 
-  async check(ctx) {
-    const me = await api<{ data: { name: string } }>(ctx, '/users/me')
-    return { ok: true, name: me.data.name }
+  // X bills every GET /2/users/me ($0.01), and the app checks logins every few hours: refreshing the token (free,
+  // and refused once the login is revoked) is the check instead.
+  async check(ctx, account) {
+    await accessToken(ctx)
+    return { ok: true, name: account.name }
   },
 
   applySettings(setting) {

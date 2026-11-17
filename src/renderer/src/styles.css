@@ -78,6 +78,7 @@ a { color: var(--accent); }
 .nav .ico { width: 18px; text-align: center; }
 .nav .count { margin-left: auto; font-size: 11px; background: var(--raised); color: var(--muted); border-radius: 99px; padding: 1px 7px; }
 .nav .count.new { background: var(--accent); color: #fff; font-weight: 600; }
+.nav.update { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .nav .pulse { margin-left: auto; width: 8px; height: 8px; border-radius: 50%; background: var(--custom); animation: pulse 1.4s infinite; }
 @keyframes pulse { 50% { opacity: 0.25; } }
 .side .spacer { flex: 1; }
@@ -184,6 +185,25 @@ label.check { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 .modal { width: min(560px, 92vw); max-height: 86vh; overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 22px; box-shadow: var(--shadow); }
 .modal h2 { margin: 0 0 6px; font-size: 18px; font-family: var(--serif); font-weight: 500; }
 .modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.modal.wide { width: min(740px, 94vw); }
+/* Setup walkthrough (ConnectDialog) */
+.need { font-size: 13px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; margin: 10px 0 4px; }
+.need ul { margin: 4px 0 0; padding-left: 18px; color: var(--muted); line-height: 1.55; }
+.guide { list-style: none; counter-reset: step; margin: 16px 0 8px; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.guide > li { counter-increment: step; position: relative; padding-left: 36px; line-height: 1.55; font-size: 13.5px; min-width: 0; }
+.guide > li::before { content: counter(step); position: absolute; left: 0; top: -1px; width: 24px; height: 24px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-weight: 600; font-size: 12.5px; display: grid; place-items: center; }
+.guide > li > * + * { margin-top: 8px; }
+.copyval { display: flex; align-items: center; gap: 8px; }
+.copyval > span { flex: none; min-width: 120px; }
+.copyval code { flex: 1; min-width: 0; overflow-wrap: anywhere; white-space: normal; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 5px 9px; font-size: 12.5px; line-height: 1.45; }
+.field-warn { font-size: 12px; color: var(--warn); margin-top: 4px; }
+details.trouble { font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+details.trouble summary { cursor: pointer; color: var(--ink); font-weight: 600; margin-bottom: 4px; }
+details.trouble > div { padding: 7px 0; border-top: 1px solid var(--line-soft); }
+details.trouble b { color: var(--ink); }
+.note.err { border-left-color: var(--err); color: var(--err); background: var(--err-soft); white-space: pre-wrap; }
+.note.warn { border-left-color: var(--warn); background: var(--warn-soft); color: var(--ink); margin: 8px 0; }
+.prow .effort { font-size: 11.5px; color: var(--faint); }
 .toasts { position: fixed; bottom: 18px; right: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 60; }
 .toast { background: var(--ink); color: var(--bg); border-radius: 12px; padding: 10px 14px; box-shadow: var(--shadow); max-width: 440px; font-size: 13px; white-space: pre-wrap; }
 .toast.err { background: var(--err); color: #fff; }

@@ -42,11 +42,14 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # latest.yml (version, file, SHA-512) is what installed copies read to update themselves; the blockmap
+        # lets them download only what changed.
         run: |
           git for-each-ref "refs/tags/$TAG" --format='%(contents)' > notes.md
           [ -s notes.md ] || echo "OneDraft ${TAG#v}" > notes.md
+          FILES=$(ls dist/OneDraft-Setup-*.exe dist/OneDraft-Setup-*.exe.blockmap dist/latest.yml)
           if gh release view "$TAG" > /dev/null 2>&1; then
-            gh release upload "$TAG" dist/OneDraft-Setup-*.exe --clobber
+            gh release upload "$TAG" $FILES --clobber
           else
-            gh release create "$TAG" dist/OneDraft-Setup-*.exe --title "OneDraft ${TAG#v}" --notes-file notes.md --verify-tag
+            gh release create "$TAG" $FILES --title "OneDraft ${TAG#v}" --notes-file notes.md --verify-tag
           fi

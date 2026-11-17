@@ -37,6 +37,17 @@ export function readChunk(path: string, start: number, length: number): Buffer {
 /** Fetch body from a Buffer slice, typed for fetch's BodyInit. */
 export const body = (b: Buffer): Uint8Array<ArrayBuffer> => new Uint8Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer)
 
+/**
+ * A failed sign-in step (token exchange, first API call) as what to do about it: the first `fixes` key found in the
+ * error's response body or message picks the explanation. Anything else is returned unchanged.
+ */
+export function explain(e: unknown, fixes: Record<string, string>): Error {
+  const err = e instanceof Error ? e : new Error(String(e))
+  const text = `${(err as { body?: unknown }).body ?? ''} ${err.message}`
+  for (const [code, fix] of Object.entries(fixes)) if (text.includes(code)) return new Error(fix)
+  return err
+}
+
 export function requireSetting(get: (k: string) => string | undefined, key: string, what: string): string {
   const v = get(key)?.trim()
   if (!v) throw new Error(`Set ${what} in Settings first.`)

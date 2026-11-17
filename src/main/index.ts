@@ -2,10 +2,12 @@
 // approvals, the MCP server and the IPC bridge to the UI.
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, Notification, protocol, safeStorage, shell, Tray } from 'electron'
+import { execFile } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { promisify } from 'node:util'
 import ffmpegStatic from 'ffmpeg-static'
 import ffprobeStatic from 'ffprobe-static'
 import { BUILTINS, loadBridges, loadPlugins } from '../connectors'
@@ -25,6 +27,7 @@ import { claudeStatus, ClaudeCodeAgent, findClaude, startSignIn } from './claude
 import { renderComposition } from './composer'
 import { makeContextFactory, settingString, type Paths } from './context'
 import { OneDraftMcpServer } from './mcp-server'
+import { Updater } from './updater'
 import { listVoices, speak } from './tts'
 
 protocol.registerSchemesAsPrivileged([
@@ -108,6 +111,25 @@ async function main() {
     return Number.isFinite(v) && v >= 0 ? v : 30
   }
   const inbox = new Inbox(engine, { everyMin: inboxEvery, onChange: () => send('changed', 'inbox') })
+
+  // ---- updates from GitHub Releases (installed app only) ----
+  let announced: string | undefined
+  const updater = new Updater({
+    onChange: (s) => {
+      send('changed', 'update')
+      if (s.state === 'ready' && s.version && announced !== s.version && Notification.isSupported()) {
+        announced = s.version
+        const n = new Notification({ title: `OneDraft ${s.version} is ready`, body: 'Restart OneDraft to update (or it updates the next time you quit).' })
+        n.on('click', () => openPage('settings'))
+        n.show()
+      }
+    },
+    busy: () => engine.isBusy(),
+    log: (level, message) => store.log(level, message),
+    beforeQuit: () => {
+      quitting = true
+    }
+  })
 
   // ---- start with Windows (Settings → App) ----
   // Only the installed app: a dev run would register node_modules' electron.exe, which can't start OneDraft.
@@ -276,6 +298,9 @@ async function main() {
   const connecting = new Map<string, AbortController>()
   const handlers: Record<string, (...a: never[]) => unknown> = {
     'app.info': () => ({ version: app.getVersion(), paths, encryption: cipher !== plainCipher, packaged: app.isPackaged }),
+    'update.status': () => updater.status,
+    'update.check': () => updater.check(),
+    'update.install': () => updater.install(),
     'app.takePage': () => {
       const p = startPage
       startPage = undefined
@@ -447,6 +472,16 @@ async function main() {
       if (/^https?:\/\//.test(url)) return shell.openExternal(url)
     },
     'shell.showItem': (path: string) => shell.showItemInFolder(path),
+    // OneDraft's icon as a square PNG for developer-app forms (TikTok wants 1024 × 1024), shown in File Explorer.
+    'app.iconFile': async (size: number) => {
+      const src = iconPath()
+      if (!src) throw new Error('OneDraft’s icon file is missing.')
+      const n = Math.max(64, Math.min(2048, Math.round(Number(size) || 1024)))
+      const out = join(paths.temp, `OneDraft-icon-${n}.png`)
+      if (!existsSync(out)) await promisify(execFile)(mediaTools.ffmpeg, ['-y', '-loglevel', 'error', '-i', src, '-vf', `scale=${n}:${n}:flags=lanczos`, out])
+      shell.showItemInFolder(out)
+      return out
+    },
     'shell.openPath': (path: string) => shell.openPath(path)
   }
   ipcMain.handle('call', async (e, method: string, ...args: unknown[]) => {
@@ -480,6 +515,9 @@ async function main() {
     n.show()
   }
   const runBackgroundCheck = () => void backgroundCheck().catch((e: Error) => store.log('warn', `Inbox check: ${e.message}`))
+  // A newer OneDraft: shortly after start, then every 4 hours.
+  setTimeout(() => updater.check(), 15_000)
+  setInterval(() => updater.check(), 4 * 3600_000)
   setInterval(runBackgroundCheck, 60_000)
   setTimeout(runBackgroundCheck, 20_000)
   setInterval(

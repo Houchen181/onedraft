@@ -9,7 +9,7 @@ import {
 } from '../core/connector'
 import { check, expiresSoon, form, getJson, HttpError, secondsToPacificMidnight, sleep, type OAuthTokens } from '../core/http'
 import type { Account, Comment } from '../shared/types'
-import { body, fileSize, mimeOf, readChunk, requireSetting } from './util'
+import { body, explain, fileSize, mimeOf, readChunk, requireSetting } from './util'
 
 const API = 'https://www.googleapis.com/youtube/v3'
 const UPLOAD = 'https://www.googleapis.com/upload/youtube/v3'
@@ -58,7 +58,7 @@ async function accessToken(ctx: ConnectorContext): Promise<string> {
   })
   if (res.status === 400 || res.status === 401) {
     throw new NeedsLoginError(
-      'Google refused the saved login (expired or revoked). If your OAuth app is in "Testing", Google expires logins after 7 days.'
+      'Google signed OneDraft out (it does that every 7 days while your Google app is in Testing). Press Connect in Settings → Platforms to sign in again.'
     )
   }
   const j = (await (await check(res, 'Refresh YouTube token')).json()) as { access_token: string; expires_in: number }
@@ -110,13 +110,94 @@ export const youtube: Connector = {
     settings: [
       {
         key: 'clientId',
-        label: 'OAuth client ID',
+        label: 'Client ID',
         type: 'text',
         required: true,
-        help: 'Google Cloud console → APIs & Services → Credentials → Create OAuth client → "Desktop app". Enable "YouTube Data API v3" first.'
+        placeholder: '1234…apps.googleusercontent.com',
+        pattern: '^\\d+-[a-z0-9]+\\.apps\\.googleusercontent\\.com$',
+        mismatch: 'A Google Client ID ends in .apps.googleusercontent.com. Copy the Client ID, not the secret or an API key.'
       },
-      { key: 'clientSecret', label: 'OAuth client secret', type: 'secret', help: 'Shown with the client ID. Desktop-app secrets are not confidential.' }
+      {
+        key: 'clientSecret',
+        label: 'Client secret',
+        type: 'secret',
+        required: true,
+        placeholder: 'GOCSPX-…',
+        pattern: '^GOCSPX-[\\w-]+$',
+        mismatch: 'A Google Client secret starts with GOCSPX- (only very old ones don’t). Check you copied the secret, not the Client ID.'
+      }
     ],
+    signIn:
+      'Your browser opens Google. Pick the Google account that owns your channel. Google warns “Google hasn’t verified this app”: that is expected for an app you made yourself. Press **Continue** (or **Advanced**, then **Go to OneDraft (unsafe)**), tick every box and press **Continue**.',
+    guide: {
+      why: 'YouTube only lets an app upload for you when the app has its own key from Google. OneDraft has no company behind it, so you make that key yourself, once, in Google Cloud. It’s free, and the key stays on this computer.',
+      need: [
+        'The Google account that owns your YouTube channel. A personal Gmail works best: school and work accounts can block apps like this.',
+        'No credit card: skip any free-trial offer Google shows'
+      ],
+      time: 'about 10 minutes',
+      steps: [
+        {
+          text: 'Make a project: sign in to Google Cloud with the account that owns your channel (accept the terms if it asks). Project name **OneDraft**, Location **No organization**, press **Create**. Then pick **OneDraft** in the project picker at the top of the page.',
+          link: { label: 'Open “New project”', url: 'https://console.cloud.google.com/projectcreate' },
+          copy: [{ label: 'Project name', value: 'OneDraft' }]
+        },
+        {
+          text: 'Turn on the YouTube Data API v3: check that the project picker says **OneDraft**, then press **Enable**.',
+          detail: 'If the page doesn’t show the API, search the API Library for “YouTube Data API v3”.',
+          link: { label: 'Open YouTube Data API v3', url: 'https://console.cloud.google.com/apis/library/youtube.googleapis.com' }
+        },
+        {
+          text: 'Turn on the YouTube Analytics API the same way (OneDraft reads your views and likes with it): press **Enable**.',
+          link: { label: 'Open YouTube Analytics API', url: 'https://console.cloud.google.com/apis/library/youtubeanalytics.googleapis.com' }
+        },
+        {
+          text: 'Set up the sign-in screen: press **Get started**. App name **OneDraft** and your email as User support email, **Next**. Audience **External**, **Next**. Your email again, **Next**. Tick **I agree to the Google API Services: User Data Policy**, **Continue**, then **Create**.',
+          detail: 'Don’t upload a logo: that makes Google ask for a review.',
+          link: { label: 'Open Branding', url: 'https://console.cloud.google.com/auth/branding' },
+          copy: [{ label: 'App name', value: 'OneDraft' }]
+        },
+        {
+          text: 'Let your account in: on the **Audience** page, under **Test users**, press **Add users**, type the Google account that owns your channel and press **Save**.',
+          link: { label: 'Open Audience', url: 'https://console.cloud.google.com/auth/audience' }
+        },
+        {
+          text: 'Make the key: press **Create client**. Application type **Desktop app**, Name **OneDraft**, leave “AI-powered agent” unticked, press **Create**. Copy the **Client ID** and the **Client secret** into the boxes below before you close Google’s window.',
+          detail: 'Google shows the secret only this once, so press **Download JSON** too. Lost it? Open the client and press **Add secret**.',
+          link: { label: 'Open Clients', url: 'https://console.cloud.google.com/auth/clients' },
+          fields: ['clientId', 'clientSecret']
+        },
+        {
+          text: 'Optional: while your app is in Testing, Google signs OneDraft out every 7 days and OneDraft asks you to press Connect again. To stop that, on **Branding** fill in a home page and privacy policy link (below) and **Save**, then on **Audience** press **Publish app** and **Confirm**.',
+          detail: 'If Publish app stays greyed out, skip this step: everything else works.',
+          copy: [
+            { label: 'Home page', value: 'https://github.com/Houchen181/onedraft' },
+            { label: 'Privacy policy', value: 'https://github.com/Houchen181/onedraft/blob/main/docs/privacy.md' }
+          ]
+        }
+      ],
+      trouble: [
+        { problem: '“Google hasn’t verified this app”', fix: 'Expected: it’s the app you just made. Press Continue, or Advanced and then Go to OneDraft (unsafe).' },
+        {
+          problem: '“Access blocked” or “Error 403: access_denied”',
+          fix: 'Your Google account isn’t a test user yet. Add it under Audience → Test users (step 5), then press Connect again.'
+        },
+        {
+          problem: '“Error 400: redirect_uri_mismatch”',
+          fix: 'The client isn’t a Desktop app. Make a new client with Application type Desktop app (step 6) and paste its Client ID and secret.'
+        },
+        { problem: '“Error 401: invalid_client” or “deleted_client”', fix: 'The Client ID or secret has a typo, or the client was deleted. Copy both again from Google Cloud → Clients (step 6).' },
+        {
+          problem: '“YouTube Data API v3 has not been used in project … or it is disabled”',
+          fix: 'Turn on the YouTube Data API v3 in the same project (the picker at the top must say OneDraft), wait a minute, then press Connect.'
+        },
+        {
+          problem: '“This Google account has no YouTube channel”',
+          fix: 'Sign in with the account that owns the channel. If the channel belongs to a Brand Account, pick that channel when Google asks which one to use.'
+        },
+        { problem: 'Publish app is greyed out', fix: 'Google wants a home page and privacy policy link first, and sometimes still refuses. You can skip it: OneDraft just asks you to sign in again once a week.' }
+      ]
+    },
     connectFields: [],
     options: [
       {
@@ -136,8 +217,8 @@ export const youtube: Connector = {
       { key: 'notifySubscribers', label: 'Notify subscribers', type: 'boolean', default: true }
     ],
     notes: [
-      'Uses your own Google Cloud OAuth client. While the app is in "Testing", Google expires the login every 7 days.',
-      'Quota: 100 uploads a day per Google Cloud project.',
+      'While your Google app is in Testing, Google signs OneDraft out every 7 days: press Connect again when OneDraft asks.',
+      'Google allows 100 uploads a day per project. Videos over 15 minutes need a phone-verified channel.',
       'Vertical videos up to 3 minutes are published as Shorts automatically.'
     ]
   },
@@ -174,16 +255,37 @@ export const youtube: Connector = {
         })
       },
       'Google token exchange'
-    )
+    ).catch((e) => {
+      throw explain(e, {
+        invalid_client:
+          'Google doesn’t accept this Client ID and Client secret together. Copy both again from the same client (Google Cloud → Clients → OneDraft) and press Connect.',
+        client_secret:
+          'Google wants the Client secret too. Paste it from Google Cloud → Clients → OneDraft (or from the JSON file you downloaded) and press Connect.',
+        invalid_grant: 'The sign-in took too long, or was used twice. Press Connect again.'
+      })
+    })
+    // Google's permission screen has a tick box per permission; an unticked upload box would only fail at the first post.
+    if (tok.scope && !tok.scope.split(' ').includes(SCOPES[0]))
+      throw new Error('Google didn’t give OneDraft permission to upload videos. Press Connect again and tick every box on Google’s permission screen.')
     ctx.secrets.set({
       accessToken: tok.access_token,
       refreshToken: tok.refresh_token,
       expiresAt: Date.now() + tok.expires_in * 1000,
       scope: tok.scope
     } satisfies OAuthTokens)
-    const ch = await api<{ items?: Channel[] }>(ctx, '/channels?part=snippet&mine=true')
+    const ch = await api<{ items?: Channel[] }>(ctx, '/channels?part=snippet&mine=true').catch((e) => {
+      throw explain(e, {
+        accessNotConfigured:
+          'The YouTube Data API v3 is off in this Google Cloud project. Turn it on (the “Turn on the YouTube Data API v3” step; check the project name at the top), wait a minute, then press Connect.',
+        SERVICE_DISABLED:
+          'The YouTube Data API v3 is off in this Google Cloud project. Turn it on (the “Turn on the YouTube Data API v3” step; check the project name at the top), wait a minute, then press Connect.'
+      })
+    })
     const c = ch.items?.[0]
-    if (!c) throw new Error('This Google account has no YouTube channel. Create one at youtube.com first.')
+    if (!c)
+      throw new Error(
+        'This Google account has no YouTube channel. Press Connect again and pick the account that owns your channel (or create a channel at youtube.com first).'
+      )
     return {
       name: c.snippet.title,
       handle: c.snippet.customUrl,

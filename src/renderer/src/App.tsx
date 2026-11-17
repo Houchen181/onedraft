@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { Account, ApprovalRequest, InboxStatus, PlatformManifest, Post } from '@shared/types'
+import type { Account, ApprovalRequest, InboxStatus, PlatformManifest, Post, UpdateStatus } from '@shared/types'
 import { call, on, useData } from './api'
 import { Calendar } from './pages/Calendar'
 import { Chat } from './pages/Chat'
@@ -35,6 +35,7 @@ export function App() {
   const { data: posts } = useData<Post[]>('posts.list', [], ['posts'])
   const { data: profile } = useData<{ values: Record<string, unknown> }>('settings.get', [], ['accounts'])
   const { data: inbox } = useData<InboxStatus>('inbox.status', [], ['inbox', 'accounts'])
+  const { data: update } = useData<UpdateStatus>('update.status', [], ['update'])
 
   const loadPlatforms = useCallback(() => void call<PlatformManifest[]>('platforms').then(setPlatforms), [])
   useEffect(loadPlatforms, [loadPlatforms, page])
@@ -163,6 +164,15 @@ export function App() {
             </button>
           ))}
           <div className="spacer" />
+          {update?.state === 'ready' && (
+            <button
+              className="nav update"
+              title={`Install OneDraft ${update.version} and start it again`}
+              onClick={() => call('update.install').catch((e: Error) => toast(e.message, true))}
+            >
+              <span className="ico">⟳</span>Restart to update
+            </button>
+          )}
           <button className={`nav ${page === 'settings' ? 'on' : ''}`} onClick={() => ctx.go('settings')}>
             <span className="ico">⚙</span>Settings
           </button>

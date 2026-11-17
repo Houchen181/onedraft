@@ -165,8 +165,9 @@ export const rednote: Connector = {
         ]
       }
     ],
+    signIn:
+      'A browser window opens on Rednote’s creator site (creator.xiaohongshu.com). Sign in there: scan the QR code with the Rednote (小红书) app, or use your phone number. The window closes by itself when you are in; OneDraft keeps that login in its own browser profile.',
     notes: [
-      'Logs in through a real browser window: scan the QR code with the Rednote app.',
       'One web session per account: logging in on another computer’s browser signs OneDraft out.',
       'OneDraft sets Rednote’s AI-content declaration when the post is marked AI-generated.',
       'Rednote allows roughly 50 posts a day; titles are 20 characters (English letters count half).'

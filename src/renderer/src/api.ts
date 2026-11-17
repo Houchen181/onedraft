@@ -27,7 +27,7 @@ export async function call<T = unknown>(method: string, ...args: unknown[]): Pro
 export const on = (channel: Channel, fn: (payload: unknown) => void) => window.onedraft.on(channel, fn)
 
 /** Load data from the main process and reload when it reports a change of `kind`. */
-export function useData<T>(method: string, args: unknown[], kinds: ('posts' | 'accounts' | 'events' | 'projects' | 'inbox' | 'stats' | 'speech' | 'transcripts')[] = []) {
+export function useData<T>(method: string, args: unknown[], kinds: ('posts' | 'accounts' | 'events' | 'projects' | 'inbox' | 'stats' | 'speech' | 'transcripts' | 'update')[] = []) {
   const [data, setData] = useState<T>()
   const [error, setError] = useState<string>()
   const key = JSON.stringify([method, args])

@@ -44,6 +44,12 @@ desktop shortcuts and opens OneDraft. The installer isn't code-signed, so the fi
 *Windows protected your PC*: choose **More info → Run anyway**. Installing a newer version replaces the old one and
 keeps your data; uninstalling (Settings → Apps) keeps it too.
 
+**Updates.** From 0.1.2 on, OneDraft updates itself: it looks for a new release when it starts and every few hours,
+downloads it in the background (checked against the SHA-512 published with the release) and then shows
+**Restart to update** in the sidebar and in Settings → App. Restart then, or let it install the next time you quit
+OneDraft. Settings → App → *Check for updates* looks right away. Versions before 0.1.2 can't update themselves:
+install 0.1.2 (or later) from the release page once.
+
 To have scheduled posts go out after a restart without opening OneDraft yourself, turn on
 Settings → App → *Start OneDraft in the tray when you sign in to Windows*.
 
@@ -51,7 +57,9 @@ Build the installer yourself with `npm install` then `npm run dist` (→ `dist\O
 
 **Releasing a version:** set `version` in `package.json`, commit, then tag it with the release notes as the
 message and push the tag (`git tag -a v0.2.0 -m "…"` then `git push origin v0.2.0`). GitHub Actions
-(`.github/workflows/release.yml`) tests it, builds the installer and publishes the release.
+(`.github/workflows/release.yml`) tests it, builds the installer and publishes the release, with the `latest.yml`
+and `.blockmap` files installed copies read to update themselves (keep them on every release). To try an update
+before publishing, serve `dist\` over http and start an installed build with `ONEDRAFT_UPDATE_URL=http://host:port/`.
 
 ## Run it from source
 
@@ -107,18 +115,24 @@ encrypted with Windows' own protection (Electron `safeStorage`).
 - **AI labels**: mark a post AI-generated and each connector sets that platform's disclosure
   (`containsSyntheticMedia`, `is_aigc`, `made_with_ai`, `is_ai_generated`, Rednote's AI-content declaration).
 
-## Platform setup (personal use)
+## Connect your accounts
 
-| Platform | What you need | Caveats |
+In Settings → Platforms, press **Connect** next to a platform. OneDraft walks you through it in the app: which
+page to open, what to click, what to type and where to paste each key, with a Copy button for every value and a
+check that catches the usual copy-paste mix-ups.
+
+| Platform | What connecting takes | Good to know |
 |---|---|---|
-| YouTube | Google Cloud project → enable *YouTube Data API v3* → OAuth client type **Desktop app** → paste client ID/secret in Settings | While the OAuth app is in "Testing", Google expires logins every 7 days. 100 uploads/day. |
-| Bilibili | Nothing — OneDraft downloads [biliup](https://github.com/biliup/biliup) (MIT) when you connect; scan the QR code in its window | The AI-content declaration must be turned on in the creator centre. Native schedule 4 h–15 days ahead. |
-| Rednote | Nothing — a browser window opens; scan the QR code | Defaults to *handoff*: OneDraft fills the note, you press Publish (Rednote penalises automated accounts). |
-| Instagram | Meta app (Business) → Instagram → *API setup with Instagram login* → generate a token for your Business/Creator account; paste it when connecting | Images need a public media host (Settings; any S3-compatible bucket such as Cloudflare R2). |
-| TikTok | developers.tiktok.com app with Login Kit (Desktop) + Content Posting API; redirect `http://127.0.0.1:53682/callback/` | Until TikTok audits the app, posts are private and the account must be private. |
-| X | console.x.com app, OAuth 2.0 type **Native App**, callback `http://127.0.0.1:53682/callback` | Pay-per-use: ~$0.015/post, ~$0.20 with a link; reading a reply ~$0.005 (the Inbox reads each one once). |
+| Rednote | Sign in: a browser window opens; scan the QR code with the Rednote app | OneDraft fills the note and you press Publish (Rednote penalises automated accounts). |
+| Bilibili | Sign in: scan a QR code with the Bilibili app (the first time, OneDraft downloads [biliup](https://github.com/biliup/biliup), MIT) | Turn on the AI-content declaration in the creator centre yourself. |
+| YouTube | A one-time setup in Google Cloud (free, about 10 minutes), then sign in with Google | While your Google app is in Testing, Google signs OneDraft out every 7 days. 100 uploads a day. |
+| X | A one-time setup in X's developer console (about 10 minutes), then sign in with X | X bills you directly: buy API credits (from $5), then about $0.015 per post, $0.20 with a link. |
+| TikTok | A one-time setup on TikTok for Developers (about 15 minutes), then sign in with TikTok | TikTok approves apps only for companies, so yours stays in its Sandbox: OneDraft sends videos to your TikTok drafts and you post them from the app. |
+| Instagram | A one-time setup on Meta for Developers (about 15 minutes) for a Business or Creator account; paste the token it gives you | Meta apps created after late October 2026 get a new setup OneDraft can't use yet. Photo posts also need a public media host (Settings → Media host). |
 
-Research behind these choices: [docs/platform-research-2026-11.md](docs/platform-research-2026-11.md).
+Why YouTube, X, TikTok and Instagram need a setup: they only let apps post through their official APIs, and each
+app needs its own key from the platform. OneDraft has no company or server behind it, so you make that key once,
+and it stays on your computer. Research behind these choices: [docs/platform-research-2026-11.md](docs/platform-research-2026-11.md).
 
 ## The assistant: your Claude plan or an API key
 

@@ -1,7 +1,47 @@
 import { useEffect, useState } from 'react'
-import type { FieldSpec, LogEvent, PlatformManifest, SettingsView, SpeechStatus } from '@shared/types'
+import type { FieldSpec, LogEvent, PlatformManifest, SettingsView, SpeechStatus, UpdateStatus } from '@shared/types'
 import { call, useData } from '../api'
-import { Avatar, ConnectDialog, Field, PlatformIcon, Status, useApp } from '../ui'
+import { Avatar, ConnectDialog, Field, PlatformIcon, Status, timeAgo, useApp } from '../ui'
+
+/** The running version and its updates (from GitHub Releases). */
+function UpdateRow() {
+  const app = useApp()
+  const { data: u } = useData<UpdateStatus>('update.status', [], ['update'])
+  if (!u) return null
+  const pct = Math.round((u.progress ?? 0) * 100)
+  const text =
+    u.state === 'dev'
+      ? 'A development run: updates come with the installed app.'
+      : u.state === 'checking'
+        ? 'Checking for updates…'
+        : u.state === 'downloading'
+          ? `Downloading OneDraft ${u.version}… ${pct}%`
+          : u.state === 'ready'
+            ? `OneDraft ${u.version} is ready. Restart to update, or it updates the next time you quit.`
+            : u.state === 'none'
+              ? `Up to date${u.checkedAt ? ` (checked ${timeAgo(u.checkedAt)})` : ''}.`
+              : u.state === 'error'
+                ? `Couldn’t check for updates: ${u.error}`
+                : 'Looks for updates in the background.'
+  const install = () => call('update.install').catch((e: Error) => app.toast(e.message, true))
+  return (
+    <div className="row wrap" style={{ marginBottom: 12 }}>
+      <b>OneDraft {u.current}</b>
+      <span className="small muted grow">{text}</span>
+      {u.state === 'ready' ? (
+        <button className="btn primary sm" onClick={() => void install()}>
+          Restart to update
+        </button>
+      ) : (
+        u.state !== 'dev' && (
+          <button className="btn sm" disabled={u.state === 'checking' || u.state === 'downloading'} onClick={() => void call('update.check')}>
+            Check for updates
+          </button>
+        )
+      )}
+    </div>
+  )
+}
 
 /** Local speech-to-text (Whisper): what's installed, or a one-time setup with its exact downloads. */
 function SpeechCard() {
@@ -296,8 +336,23 @@ export function Settings() {
   const [setupOpen, setSetupOpen] = useState<string>()
   const [busyAcct, setBusyAcct] = useState<string>()
   const { data: events } = useData<LogEvent[]>('events.list', [150], ['events'])
+  /** Required setup values (developer keys) still missing. A default counts as set. */
   const missing = (p: PlatformManifest) =>
-    p.settings.filter((s) => s.required && !(value(`${p.id}.${s.key}`) || settings?.secretsSet.includes(`${p.id}.${s.key}`)))
+    p.settings.filter((s) => s.required && s.default === undefined && !(value(`${p.id}.${s.key}`) || settings?.secretsSet.includes(`${p.id}.${s.key}`)))
+  /** Settings the setup walkthrough doesn't cover (preferences, advanced): shown under Options. */
+  const extraSettings = (p: PlatformManifest) => {
+    const inGuide = new Set(p.guide?.steps.flatMap((s) => s.fields ?? []) ?? [])
+    return p.settings.filter((s) => !inGuide.has(s.key))
+  }
+  const names = (ps: PlatformManifest[]) => {
+    const n = ps.map((p) => p.name)
+    return n.length > 1 ? `${n.slice(0, -1).join(', ')} and ${n[n.length - 1]}` : (n[0] ?? '')
+  }
+  /** The walkthrough is done once its keys are saved (a token pasted at every Connect never is). */
+  const setupDone = (p: PlatformManifest) =>
+    !!p.guide && !missing(p).length && !p.guide.steps.some((s) => s.fields?.some((k) => p.connectFields.some((f) => f.key === k)))
+  const signInOnly = app.platforms.filter((p) => !p.guide)
+  const withSetup = app.platforms.filter((p) => p.guide)
   const acctAction = async (id: string, fn: () => Promise<unknown>, ok?: string) => {
     setBusyAcct(id)
     try {
@@ -394,14 +449,18 @@ export function Settings() {
       <div className="card" id="s-platforms">
         <h2>Platforms</h2>
         <p className="muted small" style={{ marginTop: -6 }}>
-          One account per platform. Signing in with a different account replaces the old one.
+          Press <b>Connect</b> next to each platform you post to.
+          {signInOnly.length > 0 && ` ${names(signInOnly)} ${signInOnly.length > 1 ? 'only need' : 'only needs'} you to sign in.`}
+          {withSetup.length > 0 &&
+            ` ${names(withSetup)} ${withSetup.length > 1 ? 'need' : 'needs'} a one-time setup on the platform’s developer site first: Connect walks you through it step by step.`}{' '}
+          One account per platform.
         </p>
         <div style={{ maxWidth: 360, marginBottom: 6 }}>
           <Field spec={PROFILE_FIELD} value={value('profile.name')} onChange={(v) => set('profile.name', v)} />
         </div>
         {app.platforms.map((p) => {
           const a = app.accountFor(p.id)
-          const miss = missing(p)
+          const extra = extraSettings(p)
           const open = setupOpen === p.id
           return (
             <div className="prow" key={p.id}>
@@ -419,13 +478,19 @@ export function Settings() {
                     {a.statusNote && <span className="faint"> · {a.statusNote.slice(0, 120)}</span>}
                   </div>
                 ) : (
-                  <div className="acct">{miss.length ? 'Needs a one-time setup first' : 'Not connected'}</div>
+                  <div className="acct">
+                    Not connected
+                    <span className="effort">
+                      {' · '}
+                      {!p.guide ? 'just sign in' : setupDone(p) ? 'setup done, ready to connect' : `one-time setup first (${p.guide.time})`}
+                    </span>
+                  </div>
                 )}
               </div>
               <div className="row">
-                {p.settings.length > 0 && (
+                {extra.length > 0 && (
                   <button className="btn ghost sm" onClick={() => setSetupOpen(open ? undefined : p.id)}>
-                    {open ? 'Hide setup' : 'Setup'}
+                    {open ? 'Hide options' : 'Options'}
                   </button>
                 )}
                 {a ? (
@@ -447,25 +512,16 @@ export function Settings() {
                     </button>
                   </>
                 ) : (
-                  <button
-                    className="btn primary sm"
-                    onClick={() => (miss.length ? setSetupOpen(p.id) : setConnectP(p))}
-                    title={miss.length ? `Fill in ${miss.map((s) => s.label).join(', ')} first` : ''}
-                  >
+                  <button className="btn primary sm" onClick={() => setConnectP(p)}>
                     Connect
                   </button>
                 )}
               </div>
               {open && (
                 <div className="setup">
-                  {p.docsUrl && (
-                    <a href="#" className="small" onClick={() => call('shell.open', p.docsUrl)}>
-                      How to set up {p.name} ↗
-                    </a>
-                  )}
-                  <div style={{ marginTop: 10 }}>{fields(p.settings.map((s) => ({ ...s, key: `${p.id}.${s.key}` })))}</div>
+                  {fields(extra.map((s) => ({ ...s, key: `${p.id}.${s.key}` })))}
                   <div className="help" style={{ marginTop: 8 }}>
-                    Press Save (top right), then Connect.
+                    Press Save (top right) to keep changes.
                   </div>
                 </div>
               )}
@@ -567,6 +623,7 @@ export function Settings() {
 
       <div className="card" id="s-app">
         <h2>App</h2>
+        <UpdateRow />
         {fields(APP_FIELDS)}
       </div>
 
@@ -581,7 +638,7 @@ export function Settings() {
           ))}
         </div>
       </div>
-      {connectP && <ConnectDialog platform={connectP} onClose={() => setConnectP(undefined)} />}
+      {connectP && <ConnectDialog platform={connectP} onClose={() => setConnectP(undefined)} onSaved={reload} />}
     </div>
   )
 }

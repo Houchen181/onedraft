@@ -62,6 +62,29 @@ these change often. Sources are the official docs and the projects' own source f
   So the connector defaults to *handoff*: it fills the note and you press Publish. AI declaration: the content-type declaration → "contains AI-generated content".
 - Optional: `xiaohongshu-mcp` (Apache-2.0, Go) can be attached through the MCP bridge connector instead.
 
+## Setting up your own developer app (re-checked 2026-11-16, for the in-app walkthroughs)
+From the docs, without signing in to any console; the walkthroughs live in each connector's `manifest.guide`.
+- **YouTube**: the 2026-11-02 lift of the private lock is confirmed (Data API revision history). Client secrets are
+  shown only when the client is created (then hashed; "Add secret" makes a new one). **Publish app** has been reported
+  greyed out since about 2026-08 until Branding has a home page and privacy-policy link on an authorized domain
+  (github.com links reportedly fail, github.io pages work), so the walkthrough keeps the app in Testing with the
+  person as a test user (re-login every 7 days) and makes publishing optional. Unverified production apps: 100 users
+  for the project's life.
+- **X**: developer access is console.x.com, pay-per-use only for new developers ("Legacy Free"). Credits first
+  ($5 minimum, card; a zero balance blocks every call with 402 CreditsDepleted; $20 bonus after the first purchase).
+  Since 2026-04-20: post $0.015, post with a URL $0.20, reads $0.005 per post, `GET /2/users/me` $0.01 (so the
+  periodic account check only refreshes the token). Native App = public client, no secret; a Client Secret on screen
+  means the wrong app type (`unauthorized_client`).
+- **TikTok**: production keys don't work until TikTok approves the app, and its review rejects personal upload tools,
+  so a personal app stays in **Sandbox** (up to 10 target users; sandbox keys start `sbaw`). Sandbox Direct Post =
+  SELF_ONLY on a private account, so the connector defaults to *upload to inbox* (drafts, ≤ 5 pending per 24 h): the
+  person posts from the TikTok app (reports on public accounts in Sandbox are mixed). Register the Desktop redirect
+  URI exactly, trailing slash included.
+- **Instagram**: **new Meta apps (from late Oct 2026) can't set up "API setup with Instagram login"**; they get
+  "Unified login" (a business-portfolio app and a system-user token for graph.facebook.com), which the connector doesn't
+  support yet. Older apps still work: Instagram-login tokens start with `IGAA`, last 60 days and refresh with
+  `ig_refresh_token`. Development mode is enough for your own account (Standard Access, no App Review).
+
 ## China AI-labelling rules
 The CAC's Measures for Labeling AI-Generated Synthetic Content, in force since 2025-09-01: users must declare AI content with the platform's tool.
 

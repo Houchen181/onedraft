@@ -1,10 +1,11 @@
-// TikTok via the official Content Posting API (direct post or send-to-drafts), Login Kit for Desktop.
-// Unaudited apps can only post privately (SELF_ONLY) to private accounts — see manifest notes.
+// TikTok via the official Content Posting API (send-to-drafts or direct post), Login Kit for Desktop.
+// A personal app stays in TikTok's Sandbox (TikTok doesn't approve personal tools), where direct posts can only be
+// SELF_ONLY on a private account, so sending to the TikTok app's drafts is the default.
 
 import { ContentError, NeedsLoginError, RetryableError, UnconfirmedError, type Connector, type ConnectorContext } from '../core/connector'
 import { check, expiresSoon, form, sleep, type OAuthTokens } from '../core/http'
 import { captionWithHashtags } from '../core/validate'
-import { body, fileSize, mimeOf, readChunk, requireSetting, singleFlight } from './util'
+import { body, explain, fileSize, mimeOf, readChunk, requireSetting, singleFlight } from './util'
 
 const API = 'https://open.tiktokapis.com/v2'
 const CHUNK = 10_000_000
@@ -91,22 +92,95 @@ export const tiktok: Connector = {
         label: 'Client key',
         type: 'text',
         required: true,
-        help: 'developers.tiktok.com → Manage apps → add Login Kit (Desktop) + Content Posting API (Direct Post on). Redirect URI http://127.0.0.1:53682/callback/'
+        pattern: '^sbaw\\w+$',
+        mismatch: 'Sandbox client keys start with “sbaw”. Check the toggle next to the app name says Sandbox, then copy the key shown there.'
       },
       { key: 'clientSecret', label: 'Client secret', type: 'secret', required: true },
-      { key: 'redirectPort', label: 'Redirect port', type: 'number', default: 53682 }
+      {
+        key: 'redirectPort',
+        label: 'Redirect port',
+        type: 'number',
+        default: 53682,
+        help: 'Only if another program uses 53682. Change the Desktop redirect URI on TikTok to match (http://127.0.0.1:<port>/callback/).'
+      }
     ],
+    signIn:
+      'Your browser opens TikTok. Sign in with the TikTok account you added as a target user and press **Authorize**. Then come back here.',
+    guide: {
+      why: 'TikTok only lets apps post through its API, and every app needs its own key. You make a developer app of your own, once. TikTok approves apps only for companies, so yours stays in its “Sandbox”: OneDraft sends each video to your TikTok drafts, and you post it from the TikTok app.',
+      need: ['An email address for a TikTok for Developers account (it’s separate from your TikTok login)', 'Your TikTok account and its password'],
+      time: 'about 15 minutes',
+      steps: [
+        {
+          text: 'Sign up for TikTok for Developers with your email: press **Send code to email**, type the code and finish signing up.',
+          link: { label: 'Open TikTok for Developers sign-up', url: 'https://developers.tiktok.com/signup' }
+        },
+        {
+          text: 'Make the app: press **Connect an app**, choose your own (individual) account as the owner, name it **OneDraft** and press **Confirm**. If it asks for an app type, choose **Other**.',
+          link: { label: 'Open Manage apps', url: 'https://developers.tiktok.com/apps/' },
+          copy: [{ label: 'App name', value: 'OneDraft' }]
+        },
+        {
+          text: 'Switch the toggle next to the app name to **Sandbox**, press **Create Sandbox**, name it **OneDraft** and press **Confirm**. Do every step below in the Sandbox.'
+        },
+        {
+          text: 'Fill in the app details. App icon: OneDraft’s icon (button below) or any square picture. Category: **Productivity**, or the closest. Paste the description and the addresses below. Under Platforms tick **Desktop** and paste the website address there.',
+          icon: 1024,
+          copy: [
+            { label: 'Description', value: 'OneDraft is a desktop app I use to post my own videos to my own TikTok account.' },
+            { label: 'Terms of Service URL', value: 'https://github.com/Houchen181/onedraft/blob/main/docs/terms.md' },
+            { label: 'Privacy Policy URL', value: 'https://github.com/Houchen181/onedraft/blob/main/docs/privacy.md' },
+            { label: 'Desktop website', value: 'https://github.com/Houchen181/onedraft' }
+          ]
+        },
+        {
+          text: 'Under Products press **Add products**, add **Login Kit** and **Content Posting API**, then **Done**. In Login Kit open **Redirect URI**, choose the **Desktop** tab and paste the address below exactly, with the / at the end. In Content Posting API turn on **Direct Post**.',
+          copy: [{ label: 'Redirect URI', value: 'http://127.0.0.1:{redirectPort}/callback/' }]
+        },
+        {
+          text: 'Under Scopes press **Add scopes** and turn on all four: **user.info.basic**, **video.upload**, **video.publish** and **video.list**.'
+        },
+        {
+          text: 'Under Sandbox settings → **Target users** press **Add account** and sign in with your TikTok account. Then press **Apply changes**.',
+          detail: 'It can take up to an hour before TikTok lets that account sign in.'
+        },
+        {
+          text: 'Under **Credentials** press the eye icons and copy the **Client key** and the **Client secret** into the boxes below. The toggle must still say Sandbox: Sandbox keys start with “sbaw”.',
+          fields: ['clientKey', 'clientSecret']
+        }
+      ],
+      trouble: [
+        { problem: 'TikTok says the client_key is wrong', fix: 'You copied the Production keys. Switch the toggle next to the app name to Sandbox and copy the Client key and Client secret shown there.' },
+        {
+          problem: 'TikTok says the redirect_uri doesn’t match',
+          fix: 'In Login Kit → Redirect URI → Desktop the address must be exactly http://127.0.0.1:{redirectPort}/callback/, with the / at the end. Press Apply changes after fixing it.'
+        },
+        {
+          problem: 'TikTok won’t let your account sign in, or says the app isn’t authorized for it',
+          fix: 'Add your TikTok account under Sandbox settings → Target users, press Apply changes, and wait up to an hour.'
+        },
+        {
+          problem: '“unaudited_client_can_only_post_to_private_accounts”',
+          fix: 'That post was set to “Post directly”: a Sandbox app can only post that way to a private account, visible only to you. Choose “Send to my TikTok drafts” for the post and finish it in the TikTok app.'
+        },
+        {
+          problem: 'The draft never shows up in the TikTok app',
+          fix: 'Check the TikTok app’s inbox notifications. If nothing arrives, set your account to private for a moment and send it again: TikTok’s Sandbox is unreliable with public accounts.'
+        }
+      ]
+    },
     connectFields: [],
     options: [
       {
         key: 'mode',
         label: 'How to post',
         type: 'select',
-        default: 'direct',
+        default: 'draft',
         options: [
-          { value: 'direct', label: 'Post directly' },
-          { value: 'draft', label: 'Send to TikTok drafts (finish in the app)' }
-        ]
+          { value: 'draft', label: 'Send to my TikTok drafts, I finish in the app' },
+          { value: 'direct', label: 'Post directly (only “Only me” until TikTok approves your app)' }
+        ],
+        help: 'Your own TikTok app stays in Sandbox, where posting directly is visible only to you and needs a private account. Drafts you can post publicly from the TikTok app.'
       },
       {
         key: 'privacyLevel',
@@ -138,7 +212,8 @@ export const tiktok: Connector = {
       { key: 'coverAtSec', label: 'Cover frame (seconds into the video)', type: 'number', default: 0 }
     ],
     notes: [
-      'Until TikTok audits your developer app, posts are private ("Only me") and the TikTok account must be private.',
+      'OneDraft sends videos to your TikTok drafts: open the TikTok app (inbox notifications) to add sounds and post. Up to 5 can wait there per day.',
+      'Posting directly works only for “Only me” posts on a private account until TikTok approves your app.',
       "By posting you agree to TikTok's Music Usage Confirmation.",
       'TikTok has no scheduling API: scheduled posts need OneDraft running at the publish time.'
     ]
@@ -183,7 +258,12 @@ export const tiktok: Connector = {
       open_id?: string
       error_description?: string
     }
-    if (!tok.access_token) throw new Error(`TikTok sign-in failed: ${tok.error_description ?? 'no token'}`)
+    if (!tok.access_token)
+      throw explain(new Error(`TikTok sign-in failed: ${tok.error_description ?? 'no token'}`), {
+        client_key: 'TikTok doesn’t accept this Client key: it’s probably the Production one. Switch the toggle next to the app name to Sandbox and copy the Client key and Client secret shown there.',
+        client_secret: 'TikTok doesn’t accept this Client secret. Copy it again from Credentials (with the toggle on Sandbox).',
+        redirect_uri: `The redirect URI on TikTok doesn’t match. In Login Kit → Redirect URI → Desktop it must be exactly ${r.redirectUri} (with the / at the end); press Apply changes.`
+      })
     ctx.secrets.set({ accessToken: tok.access_token, refreshToken: tok.refresh_token, expiresAt: Date.now() + (tok.expires_in ?? 7200) * 1000, openId: tok.open_id })
     const info = await ctx.fetch(`${API}/user/info/?fields=open_id,avatar_url,display_name`, { headers: { authorization: `Bearer ${tok.access_token}` } })
     const j = (await info.json()) as TtEnvelope<{ user?: { open_id: string; avatar_url?: string; display_name?: string } }>

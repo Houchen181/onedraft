@@ -7,7 +7,7 @@ import { check, getJson, HttpError, sleep } from '../core/http'
 import { MediaHost } from '../core/mediahost'
 import { captionWithHashtags } from '../core/validate'
 import type { Comment } from '../shared/types'
-import { body, fileSize, isVideo, readChunk } from './util'
+import { body, explain, fileSize, isVideo, readChunk } from './util'
 
 interface IgSecret {
   accessToken: string
@@ -141,9 +141,63 @@ export const instagram: Connector = {
         label: 'Access token',
         type: 'secret',
         required: true,
-        help: 'developers.facebook.com → your app (type Business) → Instagram → "API setup with Instagram login" → Generate token for your Business/Creator account.'
+        placeholder: 'IGAA…',
+        pattern: '^IG\\w{20,}$',
+        mismatch:
+          'Tokens for Instagram login start with “IG”. One starting with “EAA” is a Facebook token: make it under API setup with Instagram login instead (step 5).'
       }
     ],
+    signIn: 'OneDraft checks the token you pasted with Instagram and shows which account it belongs to. Nothing opens.',
+    guide: {
+      why: 'Instagram only lets apps post through its API, and every app needs its own key. You make a developer app of your own on Meta for Developers, once, and copy the access token it gives you for your account. It’s free.',
+      warning:
+        'Meta stopped offering this setup to apps created after late October 2026. If your app shows “API setup with Instagram login is not available for newer apps”, OneDraft can’t connect it yet. An app you made earlier still works.',
+      need: [
+        'An Instagram professional account (Business or Creator). To switch, in the Instagram app: your profile → ☰ → Settings and activity → Account type and tools → Switch to professional account.',
+        'A Facebook account, to sign in to Meta for Developers'
+      ],
+      time: 'about 15 minutes',
+      steps: [
+        {
+          text: 'Register as a Meta developer: sign in with Facebook, press **Next**, type the codes Meta sends to your phone and email, and pick an occupation.',
+          link: { label: 'Open Meta developer registration', url: 'https://developers.facebook.com/async/registration' }
+        },
+        {
+          text: 'Make the app: App name **OneDraft** and your email, **Next**. Use case **Manage messaging & content on Instagram**, **Next**. Business: **I don’t want to connect a business portfolio yet**, **Next**. Then **Next** and **Go to dashboard**.',
+          link: { label: 'Open “Create app”', url: 'https://developers.facebook.com/apps/creation/' },
+          copy: [{ label: 'App name', value: 'OneDraft' }]
+        },
+        {
+          text: 'In the dashboard open **Use cases** → **Manage messaging & content on Instagram** → **Customize** → **API setup with Instagram login**. Press **Add all required permissions**. Then under **Permissions and features** add **instagram_business_content_publish**, **instagram_business_manage_comments** and **instagram_business_manage_insights**.',
+          detail: 'Add these before you make the token: a token made earlier doesn’t get them.'
+        },
+        {
+          text: 'Under **Generate access tokens** press **Add account**, then **Continue**. Sign in to Instagram in the window that opens, then **Save** and **Got it**.',
+          detail:
+            'If it says “Insufficient developer role”: open App roles → Roles and add your Instagram username as an Instagram Tester. On instagram.com open More → Settings → Website permissions → Apps and websites → Tester invites and press Accept. Then press Add account again.'
+        },
+        {
+          text: 'Press **Generate token** next to your account, allow access, and copy the token straight away: Meta shows it only once. Paste it below. It starts with **IG**.',
+          fields: ['accessToken']
+        }
+      ],
+      trouble: [
+        {
+          problem: '“API setup with Instagram login is not available for newer apps”',
+          fix: 'Meta gives apps created after late October 2026 a different setup (“Unified login”), which OneDraft can’t use yet. If you made a Meta app before then, use that app.'
+        },
+        { problem: 'The token starts with EAA', fix: 'That’s a Facebook token (Facebook login setup or Graph API Explorer). Make the token under API setup with Instagram login (step 5).' },
+        {
+          problem: '“account type is not business or creator”, or “is a PERSONAL account”',
+          fix: 'Switch the Instagram account to a professional account (Business or Creator) in the Instagram app, then make a new token.'
+        },
+        {
+          problem: '“Insufficient developer role”',
+          fix: 'Add your Instagram username as an Instagram Tester (App roles → Roles) and accept the invite on instagram.com (Settings → Website permissions → Apps and websites → Tester invites). The browser must be signed in to that same Instagram account.'
+        },
+        { problem: 'Posting fails with a permission error', fix: 'The token was made before the permissions in step 3 were added. Make a new token and press Connect again with it.' }
+      ]
+    },
     options: [
       {
         key: 'format',
@@ -159,8 +213,8 @@ export const instagram: Connector = {
       { key: 'coverAtSec', label: 'Reel cover frame (seconds)', type: 'number', default: 0 }
     ],
     notes: [
-      'Needs an Instagram Business or Creator account.',
-      'Images (and videos, if direct upload is refused) need a public media host: set one up in Settings.',
+      'Photo posts (and videos, if Instagram refuses the direct upload) also need a public media host: Settings → Media host.',
+      'The token lasts 60 days; OneDraft renews it while you use it. If it runs out, make a new one (step 5) and press Connect.',
       'Instagram has no scheduling API: scheduled posts need OneDraft running at the publish time.',
       'About 100 API posts per 24 hours.'
     ]
@@ -171,6 +225,12 @@ export const instagram: Connector = {
     ctx.secrets.set({ accessToken, obtainedAt: Date.now() } satisfies IgSecret)
     const me = await graph<{ user_id?: string; id: string; username: string; name?: string; profile_picture_url?: string; account_type?: string }>(ctx, '/me', {
       fields: 'user_id,username,name,profile_picture_url,account_type'
+    }).catch((e) => {
+      throw explain(e, {
+        'Cannot parse access token':
+          'Instagram didn’t accept this token. Copy it again, all of it (it starts with IG), or make a new one under API setup with Instagram login.',
+        'no longer valid': 'Instagram says this token has expired or was revoked. Make a new one under API setup with Instagram login (step 5) and paste it.'
+      })
     })
     if (me.account_type && !['BUSINESS', 'MEDIA_CREATOR', 'CREATOR'].includes(me.account_type))
       throw new Error(`@${me.username} is a ${me.account_type} account; switch it to Business or Creator in the Instagram app.`)

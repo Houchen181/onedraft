@@ -3,8 +3,9 @@
 // probing, token refresh and the submit call. One cookie file per account.
 
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import {
   ContentError,
   NeedsLoginError,
@@ -145,8 +146,9 @@ export const bilibili: Connector = {
         options: ['auto', 'bda2', 'qn', 'tx', 'txa', 'alia', 'bldsa'].map((v) => ({ value: v, label: v }))
       }
     ],
+    signIn:
+      'The first time, OneDraft downloads biliup, a free uploader for Bilibili. A black console window opens with a menu: press ↓ once to highlight 扫码登录 (QR-code login) and press Enter. OneDraft also opens the QR code as a picture. In the Bilibili app, tap 扫一扫 (scan), scan it and confirm on your phone. The window closes by itself when you are in.',
     notes: [
-      'Login opens a console window from biliup: choose the QR-code login and scan it with the Bilibili app.',
       'Bilibili’s AI-content declaration can’t be set by uploaders: turn it on in the creator centre after posting AI content.',
       'Scheduled posts must be 4 hours to 15 days ahead to be held by Bilibili; otherwise OneDraft posts at the time.'
     ]
@@ -174,9 +176,28 @@ export const bilibili: Connector = {
     const dir = join(ctx.paths.data, 'bilibili')
     mkdirSync(dir, { recursive: true })
     const file = join(dir, `${randomUUID()}.json`)
-    ctx.log('Opening the biliup login window. Choose the QR-code login and scan it with the Bilibili app.')
-    await ctx.exec(exe, ['-u', file, 'login'], { cwd: dir, newConsole: true, timeoutMs: 10 * 60_000 })
-    if (!existsSync(file)) throw new Error('Login window closed before signing in.')
+    ctx.log('Opening the biliup login window. Choose 扫码登录 (QR-code login) and scan it with the Bilibili app.')
+    // biliup draws the QR code in the console and also saves it as qrcode.png (consoles that can't draw it show
+    // garbage). Open the picture as soon as it appears, and remove it afterwards: it's a one-time login code.
+    const qr = join(dir, 'qrcode.png')
+    rmSync(qr, { force: true })
+    let shown = false
+    const watch = setInterval(() => {
+      if (shown || !existsSync(qr)) return
+      shown = true
+      void ctx.openExternal(pathToFileURL(qr).href).catch(() => undefined)
+    }, 700)
+    try {
+      await ctx.exec(exe, ['-u', file, 'login'], { cwd: dir, newConsole: true, timeoutMs: 10 * 60_000 })
+    } finally {
+      clearInterval(watch)
+      try {
+        rmSync(qr, { force: true })
+      } catch {
+        // still open in a picture viewer: harmless, it expired with the login
+      }
+    }
+    if (!existsSync(file)) throw new Error('The login window closed before you signed in. Press Connect to try again.')
     const me = await whoAmI(ctx, file)
     return { name: me.name, avatarUrl: me.face, remoteUserId: me.mid, meta: { cookieFile: file, mid: me.mid } }
   },

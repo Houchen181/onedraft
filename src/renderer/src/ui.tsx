@@ -1,8 +1,8 @@
 // Small shared UI pieces.
 
 import { createContext, useContext, useState, type ReactNode } from 'react'
-import type { Account, FieldSpec, PlatformManifest, TargetStatus } from '@shared/types'
-import { call, fileName, isVideoPath, mediaUrl } from './api'
+import type { Account, FieldSpec, PlatformManifest, SettingsView, TargetStatus } from '@shared/types'
+import { call, fileName, isVideoPath, mediaUrl, useData } from './api'
 
 export interface AppCtx {
   toast(text: string, error?: boolean): void
@@ -63,53 +63,247 @@ export function Toggle({ on, onChange, disabled, title }: { on: boolean; onChang
   )
 }
 
-/** Connect (or replace) the one account for a platform. */
-export function ConnectDialog({ platform: p, onClose }: { platform: PlatformManifest; onClose: () => void }) {
+/** What pressing Connect does, for connectors that don't say. */
+const HOW: Record<string, string> = {
+  api: 'Your browser opens the platform’s sign-in page. Approve access, then come back here.',
+  browser: 'A browser window opens on the platform. Sign in there; OneDraft keeps that login in its own browser profile.',
+  cli: 'A console window opens. Choose the QR-code login and scan it with the phone app.',
+  mcp: 'OneDraft checks that the MCP server is reachable and logged in.',
+  plugin: 'The plugin handles login.'
+}
+
+/** Platforms that need a one-time setup on their developer site before the first Connect. */
+export const needsSetup = (p: PlatformManifest) => !!p.guide
+
+/** "Press **Create**" → Press <b>Create</b>; {key} → `fill(key)`. */
+function rich(text: string, fill: (key: string) => string): ReactNode[] {
+  return text
+    .replace(/\{(\w+)\}/g, (_, k: string) => fill(k))
+    .split(/\*\*(.+?)\*\*/g)
+    .map((part, i) => (i % 2 ? <b key={i}>{part}</b> : part))
+}
+
+/** A pasted value that looks like the wrong thing (e.g. an API key where the client ID goes). */
+function mismatch(spec: FieldSpec | undefined, v: unknown): string | undefined {
+  const s = String(v ?? '').trim()
+  if (!spec?.pattern || !s) return undefined
+  try {
+    return new RegExp(spec.pattern).test(s) ? undefined : (spec.mismatch ?? 'This doesn’t look like the right value. Check you copied the whole thing.')
+  } catch {
+    return undefined
+  }
+}
+
+function CopyValue({ label, value }: { label: string; value: string }) {
+  const app = useApp()
+  return (
+    <div className="copyval">
+      <span className="small muted">{label}</span>
+      <code>{value}</code>
+      <button
+        className="btn sm"
+        onClick={() => {
+          void navigator.clipboard.writeText(value)
+          app.toast(`Copied “${value}”.`)
+        }}
+      >
+        Copy
+      </button>
+    </div>
+  )
+}
+
+/**
+ * Connect (or replace) the one account for a platform. Platforms that need their own developer app first get a
+ * numbered walkthrough: each step opens the exact page, offers the values to copy, and has the box to paste the
+ * key into right where the platform shows it. The keys are saved here; nobody has to visit Settings first.
+ */
+export function ConnectDialog({ platform: p, onClose, onSaved }: { platform: PlatformManifest; onClose: () => void; onSaved?: () => void }) {
   const app = useApp()
   const existing = app.accountFor(p.id)
+  const g = p.guide
+  const { data: settings, reload } = useData<SettingsView>('settings.get', [])
+  /** Setup values typed here (setting keys without the platform prefix), saved on Connect or Close. */
+  const [typed, setTyped] = useState<Record<string, unknown>>({})
   const [input, setInput] = useState<Record<string, unknown>>(
     Object.fromEntries(p.connectFields.filter((f) => f.default !== undefined).map((f) => [f.key, f.default]))
   )
   const [busy, setBusy] = useState(false)
-  const how: Record<string, string> = {
-    api: 'Your browser opens the platform’s sign-in page. Approve access, then come back here.',
-    browser: 'A browser window opens on the platform. Log in there (scan the QR code with the phone app); OneDraft keeps that login in its own profile.',
-    cli: 'A console window opens. Choose the QR-code login and scan it with the phone app.',
-    mcp: 'OneDraft checks that the MCP server is reachable and logged in.',
-    plugin: 'The plugin handles login.'
+  const [error, setError] = useState<string>()
+  const [showSteps, setShowSteps] = useState<boolean>()
+
+  const settingSpec = (k: string) => p.settings.find((s) => s.key === k)
+  const connectSpec = (k: string) => p.connectFields.find((s) => s.key === k)
+  const saved = (k: string) => settings?.values[`${p.id}.${k}`]
+  const secretSaved = (k: string) => !!settings?.secretsSet.includes(`${p.id}.${k}`)
+  const filled = (v: unknown) => v !== undefined && v !== null && String(v).trim() !== ''
+  const hasSetting = (s: FieldSpec) => filled(typed[s.key]) || filled(saved(s.key)) || secretSaved(s.key) || s.default !== undefined
+  const fill = (k: string) => String(typed[k] ?? saved(k) ?? settingSpec(k)?.default ?? '')
+
+  const guideKeys = new Set(g?.steps.flatMap((s) => s.fields ?? []) ?? [])
+  const missingSettings = p.settings.filter((s) => s.required && !hasSetting(s))
+  const missingInput = p.connectFields.filter((f) => f.required && !filled(input[f.key]))
+  // Steps start open while there is something to do in them (a key to paste, or a token every time).
+  const stepsOpen = !!g && (showSteps ?? (missingSettings.length > 0 || p.connectFields.some((f) => guideKeys.has(f.key))))
+  const stepOf = (k: string) => (g ? g.steps.findIndex((s) => s.fields?.includes(k)) + 1 : 0)
+  const todo = [...missingSettings, ...missingInput]
+  /** "First paste the Client ID and the Client secret (step 6)." */
+  const todoText = (() => {
+    const names = todo.map((f) => `the ${f.label}`)
+    const steps = [...new Set(todo.map((f) => stepOf(f.key)).filter((n) => n > 0))]
+    const list = names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0]
+    return `First paste ${list}${steps.length ? ` (step ${steps.join(' and ')})` : ''}.`
+  })()
+
+  const persist = async () => {
+    const entries = Object.entries(typed)
+      .filter(([k, v]) => settingSpec(k) && !(settingSpec(k)!.type === 'secret' && !filled(v)))
+      .map(([k, v]) => ({ key: `${p.id}.${k}`, value: typeof v === 'string' ? v.trim() : v, secret: settingSpec(k)!.type === 'secret' }))
+    if (!entries.length) return
+    await call('settings.set', entries)
+    setTyped({})
+    reload()
+    onSaved?.()
+  }
+  const close = () => {
+    void persist().catch((e: Error) => app.toast(e.message, true))
+    onClose()
   }
   const connect = async () => {
     setBusy(true)
+    setError(undefined)
     try {
-      const values = Object.fromEntries(Object.entries(input).map(([k, v]) => [k, String(v ?? '')]))
+      await persist()
+      const values = Object.fromEntries(Object.entries(input).map(([k, v]) => [k, String(v ?? '').trim()]))
       const a = await call<Account>('accounts.connect', p.id, values)
       app.toast(`${p.name} connected as ${a.name}.`)
       onClose()
     } catch (e) {
-      app.toast((e as Error).message, true)
+      setError((e as Error).message)
     } finally {
       setBusy(false)
     }
   }
+
+  const fieldFor = (k: string) => {
+    const sSpec = settingSpec(k)
+    const spec = sSpec ?? connectSpec(k)
+    if (!spec) return null
+    const v = sSpec ? (spec.type === 'secret' ? typed[k] : (typed[k] ?? saved(k))) : input[k]
+    const warn = mismatch(spec, v)
+    return (
+      <div key={k}>
+        <Field
+          spec={spec}
+          value={v}
+          secretSet={sSpec ? secretSaved(k) : undefined}
+          onChange={(nv) => (sSpec ? setTyped((s) => ({ ...s, [k]: nv })) : setInput((s) => ({ ...s, [k]: nv })))}
+        />
+        {warn && <div className="field-warn">⚠ {warn}</div>}
+      </div>
+    )
+  }
+  const signIn = p.signIn ?? HOW[p.kind]
+
   return (
-    <Modal onClose={busy ? undefined : onClose}>
+    <Modal onClose={busy ? undefined : close} wide={!!g}>
       <div className="row" style={{ marginBottom: 6 }}>
         <PlatformIcon p={p} size={34} />
         <h2 style={{ margin: 0 }}>{existing ? `Replace your ${p.name} account` : `Connect ${p.name}`}</h2>
       </div>
       {existing && <div className="note" style={{ marginBottom: 10 }}>OneDraft keeps one account per platform. Signing in again replaces {existing.name}; drafts and scheduled posts move to the new account.</div>}
-      <p className="muted">{how[p.kind]}</p>
+      {g && !settings ? (
+        <p className="muted">Loading…</p>
+      ) : g ? (
+        <>
+          <p className="muted" style={{ marginTop: 4 }}>
+            {rich(g.why, fill)}
+          </p>
+          {g.warning && <div className="note warn">{rich(g.warning, fill)}</div>}
+          <div className="need">
+            <b>Before you start</b>
+            <ul>
+              {g.need.map((n) => (
+                <li key={n}>{n}</li>
+              ))}
+              <li>Takes {g.time}, once.</li>
+            </ul>
+          </div>
+          {stepsOpen ? (
+            <ol className="guide">
+              {g.steps.map((s, i) => (
+                <li key={i}>
+                  <div>{rich(s.text, fill)}</div>
+                  {s.detail && <div className="help">{rich(s.detail, fill)}</div>}
+                  {s.link && (
+                    <div>
+                      <button className="btn sm" onClick={() => void call('shell.open', s.link!.url)}>
+                        {s.link.label} ↗
+                      </button>
+                    </div>
+                  )}
+                  {s.icon && (
+                    <div>
+                      <button
+                        className="btn sm"
+                        onClick={() => void call('app.iconFile', s.icon).catch((e: Error) => app.toast(e.message, true))}
+                        title="Saves a PNG and shows it in File Explorer, ready to drag onto the form"
+                      >
+                        Get OneDraft’s icon ({s.icon} × {s.icon})
+                      </button>
+                    </div>
+                  )}
+                  {s.copy?.map((c) => <CopyValue key={c.label} label={c.label} value={c.value.replace(/\{(\w+)\}/g, (_, k: string) => fill(k))} />)}
+                  {s.fields?.map(fieldFor)}
+                </li>
+              ))}
+              <li>
+                <div>
+                  Press <b>{existing ? 'Sign in with another account' : 'Connect'}</b> below. {rich(signIn, fill)}
+                </div>
+              </li>
+            </ol>
+          ) : (
+            <div className="row" style={{ margin: '12px 0' }}>
+              <span className="pill ok">✓ Setup done</span>
+              <span className="small muted grow">Your {p.name} keys are saved on this computer.</span>
+              <button className="btn ghost sm" onClick={() => setShowSteps(true)}>
+                Show the setup steps
+              </button>
+            </div>
+          )}
+          {!stepsOpen && <p className="muted small">{rich(signIn, fill)}</p>}
+        </>
+      ) : (
+        <p className="muted">{rich(signIn, fill)}</p>
+      )}
       <div className="stack">
-        {p.connectFields.map((f) => (
-          <Field key={f.key} spec={f} value={input[f.key]} onChange={(v) => setInput((s) => ({ ...s, [f.key]: v }))} />
-        ))}
+        {p.connectFields.filter((f) => !(stepsOpen && guideKeys.has(f.key))).map((f) => fieldFor(f.key))}
         {p.notes.length > 0 && (
           <div className="note">
+            <b>Good to know</b>
             {p.notes.map((n) => (
               <div key={n}>• {n}</div>
             ))}
           </div>
         )}
+        {g?.trouble && g.trouble.length > 0 && (
+          <details className="trouble" open={!!error}>
+            <summary>Something not working?</summary>
+            {g.trouble.map((t) => (
+              <div key={t.problem}>
+                <b>{rich(t.problem, fill)}</b>
+                <div>{rich(t.fix, fill)}</div>
+              </div>
+            ))}
+          </details>
+        )}
+        {!g && p.source !== 'builtin' && p.docsUrl && (
+          <a href="#" className="small" onClick={() => void call('shell.open', p.docsUrl)}>
+            This connector’s setup instructions ↗
+          </a>
+        )}
+        {error && <div className="note err">{error}</div>}
       </div>
       <div className="actions">
         {busy ? (
@@ -123,10 +317,15 @@ export function ConnectDialog({ platform: p, onClose }: { platform: PlatformMani
           </>
         ) : (
           <>
-            <button className="btn ghost" onClick={onClose}>
+            {todo.length > 0 && (
+              <span className="muted small grow" style={{ alignSelf: 'center' }}>
+                {todoText}
+              </span>
+            )}
+            <button className="btn ghost" onClick={close}>
               Close
             </button>
-            <button className="btn primary" onClick={connect}>
+            <button className="btn primary" disabled={todo.length > 0} onClick={connect}>
               {existing ? 'Sign in with another account' : 'Connect'}
             </button>
           </>
@@ -290,10 +489,10 @@ export function Counter({ n, max }: { n: number; max?: number }) {
   )
 }
 
-export function Modal({ children, onClose }: { children: ReactNode; onClose?: () => void }) {
+export function Modal({ children, onClose, wide }: { children: ReactNode; onClose?: () => void; wide?: boolean }) {
   return (
     <div className="backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose?.()}>
-      <div className="modal">{children}</div>
+      <div className={`modal${wide ? ' wide' : ''}`}>{children}</div>
     </div>
   )
 }

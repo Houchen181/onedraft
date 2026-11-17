@@ -27,6 +27,13 @@ win:
     - target: nsis
       arch: [x64]
   icon: resources/icon.png
+# Where the installed app looks for updates (electron-updater reads this from resources/app-update.yml).
+# `npm run dist` never uploads: .github/workflows/release.yml publishes the release and its latest.yml.
+publish:
+  provider: github
+  owner: Houchen181
+  repo: onedraft
+  releaseType: release
 nsis:
   oneClick: true
   perMachine: false

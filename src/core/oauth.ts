@@ -49,7 +49,11 @@ export function oauthLoopback(
       }
       if (params.error) {
         done(false, params.error_description ?? params.error)
-        reject(new Error(`Sign-in was declined: ${params.error_description ?? params.error}`))
+        reject(
+          new Error(
+            `The sign-in page answered “${params.error_description ?? params.error}” instead of letting OneDraft in. Press Connect to try again and allow everything it asks for.`
+          )
+        )
         return
       }
       if (!params.code) {
@@ -63,7 +67,11 @@ export function oauthLoopback(
 
     const timer = setTimeout(() => {
       cleanup()
-      reject(new Error('Sign-in timed out after 5 minutes.'))
+      reject(
+        new Error(
+          'The sign-in page never came back to OneDraft (5 minutes). If your browser showed an error instead of “Connected”, look for it under “Something not working?” and press Connect again.'
+        )
+      )
     }, opts.timeoutMs ?? 5 * 60_000)
     const onAbort = () => {
       cleanup()

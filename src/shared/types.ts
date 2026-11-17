@@ -70,6 +70,18 @@ export interface AutoCaptions {
   maxWords?: number
 }
 
+/** Updates of the installed app (from GitHub Releases). 'dev' = a development run, which never updates. */
+export interface UpdateStatus {
+  state: 'dev' | 'idle' | 'checking' | 'none' | 'downloading' | 'ready' | 'error'
+  /** The running version. */
+  current: string
+  /** The newer version being downloaded or ready to install. */
+  version?: string
+  progress?: number
+  checkedAt?: string
+  error?: string
+}
+
 /** Local speech-to-text (whisper.cpp): what is installed and what a setup would download. */
 export interface SpeechStatus {
   installed: boolean
@@ -162,6 +174,43 @@ export interface FieldSpec {
   default?: string | number | boolean
   options?: { value: string; label: string }[]
   placeholder?: string
+  /** A pasted value that doesn't match this (JavaScript regex) shows `mismatch`: catches copying the wrong thing. */
+  pattern?: string
+  mismatch?: string
+}
+
+/**
+ * One step of a platform's setup guide, written for someone who has never seen a developer site.
+ * In `text`, **double asterisks** mark the exact label to click or type, and {key} is replaced by the value of
+ * that platform setting (e.g. {redirectPort}).
+ */
+export interface GuideStep {
+  text: string
+  /** Opens the exact page for this step. */
+  link?: { label: string; url: string }
+  /** Values to type or paste on the platform's site, each with a Copy button. */
+  copy?: { label: string; value: string }[]
+  /** Settings (manifest.settings keys) or connect fields (manifest.connectFields keys) to paste at this step. */
+  fields?: string[]
+  /** Extra detail, shown smaller. */
+  detail?: string
+  /** Offer OneDraft's icon as a PNG of this many pixels square (for app forms that ask for one). */
+  icon?: number
+}
+
+/** The one-time setup some platforms need (a developer app of your own), as a walkthrough. */
+export interface SetupGuide {
+  /** Why there is a setup at all, in a sentence or two. */
+  why: string
+  /** Something that stops it working for some people, shown before the steps. */
+  warning?: string
+  /** What to have ready before starting. */
+  need: string[]
+  /** e.g. "About 10 minutes, once". */
+  time: string
+  steps: GuideStep[]
+  /** What usually went wrong, by what the person sees. */
+  trouble?: { problem: string; fix: string }[]
 }
 
 /** What a platform accepts. Used to validate variants before anything is sent. */
@@ -218,6 +267,11 @@ export interface PlatformManifest {
   options: FieldSpec[]
   /** Caveats shown to the user, e.g. "private until audited". */
   notes: string[]
+  /** What happens when the person presses Connect, in one plain sentence (default: by connector kind). */
+  signIn?: string
+  /** Step-by-step walkthrough of the one-time setup on the platform's site (its own developer app). */
+  guide?: SetupGuide
+  /** Developer documentation, for plugins without a guide. */
   docsUrl?: string
   /** Where this connector came from: built in, a user plugin folder, or an MCP bridge. */
   source?: 'builtin' | 'plugin' | 'mcp'

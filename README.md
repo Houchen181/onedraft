@@ -38,18 +38,20 @@ comments from one Inbox.
 
 ## Install it
 
-```bash
-npm install
-npm run dist       # → dist\OneDraft-Setup-0.1.0.exe
-```
-
-Double-click `OneDraft-Setup-<version>.exe`: it installs for your Windows account (no admin), adds Start-menu and
+Download **`OneDraft-Setup-<version>.exe`** from the [latest release](https://github.com/Houchen181/onedraft/releases/latest)
+(Windows 10/11, 64-bit) and double-click it: it installs for your Windows account (no admin), adds Start-menu and
 desktop shortcuts and opens OneDraft. The installer isn't code-signed, so the first time Windows SmartScreen says
-*Windows protected your PC*: choose **More info → Run anyway**. Installing a newer build replaces the old one and
+*Windows protected your PC*: choose **More info → Run anyway**. Installing a newer version replaces the old one and
 keeps your data; uninstalling (Settings → Apps) keeps it too.
 
 To have scheduled posts go out after a restart without opening OneDraft yourself, turn on
 Settings → App → *Start OneDraft in the tray when you sign in to Windows*.
+
+Build the installer yourself with `npm install` then `npm run dist` (→ `dist\OneDraft-Setup-<version>.exe`).
+
+**Releasing a version:** set `version` in `package.json`, commit, then tag it with the release notes as the
+message and push the tag (`git tag -a v0.2.0 -m "…"` then `git push origin v0.2.0`). GitHub Actions
+(`.github/workflows/release.yml`) tests it, builds the installer and publishes the release.
 
 ## Run it from source
 

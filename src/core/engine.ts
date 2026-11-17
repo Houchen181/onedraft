@@ -10,8 +10,11 @@
 //  - typed errors decide retries (Postiz/Mixpost), backoff carries the next attempt time
 //  - prefer native scheduling: upload early, let the platform publish (social-auto-upload)
 
-import type { Account, Issue, MediaInfo, Post, PostDraft, Target, Variant } from '../shared/types'
+import { rmSync } from 'node:fs'
+import { isAbsolute, relative, resolve } from 'node:path'
+import type { Account, Issue, MediaInfo, Post, PostDraft, Target, TargetStatus, Variant } from '../shared/types'
 import {
+  CanceledError,
   ContentError,
   NeedsLoginError,
   RetryableError,
@@ -46,6 +49,20 @@ function nativeScheduleFits(c: Connector, leadMs: number, minLeadMs = NATIVE_SCH
   return leadMs >= min && leadMs <= max
 }
 
+/** Is `file` inside `folder` (not merely a path that starts with the same letters)? */
+function insideFolder(folder: string | undefined, file: string): boolean {
+  if (!folder) return false
+  const rel = relative(resolve(folder), resolve(file))
+  return !!rel && !rel.startsWith('..') && !isAbsolute(rel)
+}
+
+/** An error's text for people: no terminal colour codes, and no browser call log or launch dump after it. */
+const forPeople = (message: string) =>
+  message
+    .replace(/\u001b\[[0-9;]*m/g, '')
+    .split(/\n\s*(?:Call log:|Browser logs:)/)[0]
+    .trim()
+
 /** Connectors (plugins especially) may throw strings or plain objects; keep their name and message. */
 function asError(e: unknown): Error {
   if (e instanceof Error) return e
@@ -78,10 +95,14 @@ export class Engine {
 
   async connect(platform: string, input: Record<string, string>, signal?: AbortSignal): Promise<Account> {
     const c = this.connector(platform)
-    for (const f of c.manifest.connectFields) {
+    // "Sign in with your browser" asks only for its own fields (the same test the connectors use to pick the way).
+    const viaWeb = !!c.manifest.web && (input.method === 'web' || (!input.method && !!input._profileKey))
+    for (const f of viaWeb ? (c.manifest.web?.fields ?? []) : c.manifest.connectFields) {
       if (f.required && !input[f.key]?.trim()) throw new Error(`${f.label} is required.`)
     }
     const ctx = this.makeContext(platform, undefined, `connect:${platform}`, signal)
+    // OneDraft keeps one account per platform: this one replaces it.
+    const before = this.store.listAccounts().find((a) => a.platform === platform)
     const r = await c.connect(ctx, input)
     const account = this.store.upsertAccount({
       platform,
@@ -93,6 +114,19 @@ export class Engine {
     })
     this.store.setAccountSecret(account.id, r.secrets ?? ctx.pendingSecrets())
     this.store.log('info', `Connected ${c.manifest.name} account ${r.name}`, account.id)
+    // What the replaced account signed in with still holds its sign-in: its browser profile, its saved login file.
+    const oldProfile = before?.meta.profileKey
+    if (typeof oldProfile === 'string' && oldProfile !== r.meta?.profileKey) {
+      await ctx.forgetBrowser?.(oldProfile).catch((e: Error) => this.store.log('warn', `Couldn’t delete the previous sign-in’s browser profile: ${e.message}`, account.id))
+    }
+    const oldFile = before?.meta.cookieFile
+    if (typeof oldFile === 'string' && oldFile !== r.meta?.cookieFile && insideFolder(ctx.paths?.data, oldFile)) {
+      try {
+        rmSync(oldFile, { force: true })
+      } catch (e) {
+        this.store.log('warn', `Couldn’t delete the previous sign-in’s login file: ${(e as Error).message}`, account.id)
+      }
+    }
     return account
   }
 
@@ -104,21 +138,49 @@ export class Engine {
       const r = await c.check(this.makeContext(account.platform, account, account.id), account)
       this.store.setAccountStatus(id, r.ok ? 'connected' : 'needs_login', r.note)
     } catch (e) {
-      const needs = e instanceof NeedsLoginError || (e as Error)?.name === 'NeedsLoginError'
+      const is = (name: string) => (e as Error)?.name === name
+      // Busy right now (its browser is in use, a rate limit): says nothing about the account.
+      if (e instanceof RetryableError || is('RetryableError')) {
+        this.store.log('info', `Couldn’t check ${account.name} now: ${(e as Error).message}`, id)
+        return this.mustAccount(id)
+      }
+      const needs = e instanceof NeedsLoginError || is('NeedsLoginError')
       this.store.setAccountStatus(id, needs ? 'needs_login' : 'error', (e as Error).message)
     }
     return this.mustAccount(id)
   }
 
+  /** Accounts being disconnected: their posts don't start meanwhile. */
+  private removing = new Set<string>()
+
   async removeAccount(id: string) {
     const account = this.mustAccount(id)
     const c = this.registry.has(account.platform) ? this.connector(account.platform) : undefined
+    this.removing.add(id)
     try {
-      await c?.disconnect?.(this.makeContext(account.platform, account, account.id), account)
-    } catch (e) {
-      this.store.log('warn', `Disconnect: ${(e as Error).message}`, id)
+      try {
+        await c?.disconnect?.(this.makeContext(account.platform, account, account.id), account)
+      } catch (e) {
+        this.store.log('warn', `Disconnect: ${(e as Error).message}`, id)
+      }
+      // What was on its way through this account can't go out from here any more: say so on each post.
+      const name = c?.manifest.name ?? account.platform
+      this.store.markTargets([
+        ...this.store.targetsOfAccount(id, ['handoff']).map((t) => ({
+          id: t.id,
+          error: `${name} was disconnected. If the post’s window is still open, you can still press Post there.`
+        })),
+        ...this.store.targetsOfAccount(id, ['queued']).map((t) => ({
+          id: t.id,
+          status: 'failed' as const,
+          error: `${name} was disconnected before this went out.`,
+          clearNext: true
+        }))
+      ])
+      this.store.removeAccount(id)
+    } finally {
+      this.removing.delete(id)
     }
-    this.store.removeAccount(id)
   }
 
   mustAccount(id: string): Account {
@@ -182,16 +244,31 @@ export class Engine {
     const content = withOptionDefaults(c.manifest, resolveContent(post, t))
     const { infos, issues } = await this.probeAll(content.media)
     const opts = content.options
+    const account = this.store.getAccount(t.accountId)
+    // An account signed in on the website posts through the site's own page, where the person makes these choices.
+    const web = account?.meta.method === 'web'
     for (const f of c.manifest.options) {
-      if (f.required && (opts[f.key] === undefined || opts[f.key] === '')) {
+      if (f.required && !web && (opts[f.key] === undefined || opts[f.key] === '')) {
         issues.push({ level: 'error', field: `options.${f.key}`, message: `Choose ${f.label} for ${c.manifest.name}.` })
       }
     }
-    const account = this.store.getAccount(t.accountId)
     if (!account) issues.push({ level: 'error', field: 'account', message: 'Account was removed.' })
     else if (account.status !== 'connected')
       issues.push({ level: 'warning', field: 'account', message: `${account.name} needs to be reconnected.` })
-    return [...issues, ...validateContent(c.manifest, content, infos), ...(c.validate?.(content) ?? [])]
+    // The website takes other media than the API: its limits replace the API's, group by group.
+    const webLimits = web ? c.manifest.web?.constraints : undefined
+    const manifest = webLimits
+      ? {
+          ...c.manifest,
+          constraints: Object.fromEntries(
+            Object.keys({ ...c.manifest.constraints, ...webLimits }).map((k) => {
+              const key = k as keyof typeof webLimits
+              return [k, webLimits[key] ? { ...(c.manifest.constraints[key] ?? {}), ...webLimits[key] } : c.manifest.constraints[key]]
+            })
+          )
+        }
+      : c.manifest
+    return [...issues, ...validateContent(manifest, content, infos, { web }), ...(c.validate?.(content, account) ?? [])]
   }
 
   async validatePost(id: string): Promise<Record<string, Issue[]>> {
@@ -287,13 +364,24 @@ export class Engine {
 
   /** Called once at startup: anything left "publishing" may have gone through. */
   recover() {
+    const changes: { id: string; status?: TargetStatus; error: string | null; clearNext?: boolean }[] = []
     for (const t of this.store.stuckTargets()) {
-      this.store.setTarget(t.id, {
-        status: 'unconfirmed',
-        error: 'OneDraft closed while this was publishing. Check the platform before retrying.'
-      })
+      // On a website OneDraft only fills the post in: it went nowhere unless the person pressed Post themselves.
+      if (this.store.getAccount(t.accountId)?.meta.method === 'web') {
+        changes.push({ id: t.id, status: 'failed', error: 'OneDraft was closed while it filled this in, so it wasn’t posted (unless you pressed Post there yourself). Press Retry.', clearNext: true })
+        this.store.log('warn', 'Interrupted while filling in a post on a website; nothing was sent', t.postId)
+        continue
+      }
+      changes.push({ id: t.id, status: 'unconfirmed', error: 'OneDraft closed while this was publishing. Check the platform before retrying.' })
       this.store.log('warn', 'Interrupted while publishing; marked unconfirmed', t.postId)
     }
+    // A post handed over in OneDraft's browser window (website accounts, Rednote) lost that window on quitting.
+    const gone = 'OneDraft was closed, and the browser window with this post closed with it.'
+    for (const t of this.store.targetsByStatus('handoff')) {
+      if (!this.store.getAccount(t.accountId)?.meta.profileKey || t.error?.startsWith(gone)) continue
+      changes.push({ id: t.id, error: `${gone} If you didn’t press Post there, press “Post again”.` })
+    }
+    this.store.markTargets(changes)
   }
 
   // ---------- publishing ----------
@@ -316,7 +404,7 @@ export class Engine {
     const post = this.store.getPost(t.postId)
     const account = this.store.getAccount(t.accountId)
     const scope = t.postId
-    if (!post || !account) {
+    if (!post || !account || this.removing.has(account.id)) {
       this.store.setTarget(targetId, { status: 'failed', error: 'Post or account no longer exists.' })
       return
     }
@@ -334,11 +422,12 @@ export class Engine {
     this.aborts.set(targetId, abort)
     const attempts = t.attempts + 1
     this.store.setTarget(targetId, { status: 'publishing', attempts, error: null })
-    const label = `${account.platform}/${account.name}`
+    const label = this.labelOf(account)
     try {
       const c = this.connector(t.platform)
       const issues = (await this.validateTarget(post, t)).filter((i) => i.level === 'error' && i.field !== 'account')
       if (issues.length) throw new ContentError(issues.map((i) => i.message).join(' '))
+      if (!this.store.getAccount(account.id) || this.removing.has(account.id)) throw new ContentError('The account was disconnected.')
       // Canceled while it was being checked: nothing has been sent, so it's a plain cancel.
       if (abort.signal.aborted) {
         this.store.setTarget(targetId, { status: 'canceled', error: null, nextAttemptAt: null })
@@ -354,7 +443,18 @@ export class Engine {
       const r = await c.publish(ctx, account, { targetId, content, publishAt })
       const status = r.state === 'scheduled' ? 'scheduled' : r.state === 'handoff' ? 'handoff' : 'published'
       this.store.setTarget(targetId, { status, remoteId: r.remoteId ?? null, url: r.url ?? null, error: r.note ?? null, nextAttemptAt: null })
-      this.store.log('info', `${status === 'published' ? 'Published' : status === 'scheduled' ? 'Scheduled' : 'Ready for you to publish'} on ${label}${r.url ? `: ${r.url}` : ''}${r.note && !(r.url && r.note.includes(r.url)) ? ` (${r.note})` : ''}`, scope)
+      if (this.store.getAccount(account.id)?.status === 'needs_login') this.store.setAccountStatus(account.id, 'connected')
+      if (status === 'handoff' && r.closed) {
+        const note = r.note ?? null
+        void r.closed.then(
+          (after) => {
+            const now = this.store.getTarget(targetId)
+            if (now?.status === 'handoff' && (now.error ?? null) === note) this.store.setTarget(targetId, { error: after })
+          },
+          () => undefined
+        )
+      }
+      this.store.log('info', `${status === 'published' ? 'Published' : status === 'scheduled' ? 'Scheduled' : 'Ready for you to publish'} on ${label}${r.url ? `: ${r.url}` : ''}${r.note && !(r.url && r.note.includes(r.url)) ? `. ${r.note}` : ''}`, scope)
     } catch (e) {
       this.handleFailure(t, account, attempts, asError(e), abort.signal.aborted)
     } finally {
@@ -364,16 +464,28 @@ export class Engine {
     }
   }
 
+  /** "X (My account)" in events and notifications people read. */
+  private labelOf(account: Account): string {
+    const name = this.registry.has(account.platform) ? this.connector(account.platform).manifest.name : account.platform
+    return name === account.name ? name : `${name} (${account.name})`
+  }
+
   private handleFailure(t: Target, account: Account, attempts: number, e: Error, canceled: boolean) {
     const scope = t.postId
-    const label = `${account.platform}/${account.name}`
+    const label = this.labelOf(account)
+    // Plugins written in plain JS signal the kind by error name, so match on either.
+    const is = (cls: { name: string; prototype: Error }, name: string) => e instanceof (cls as never) || e?.name === name
+    if (canceled && is(CanceledError, 'CanceledError')) {
+      this.store.setTarget(t.id, { status: 'canceled', error: null, nextAttemptAt: null })
+      this.store.log('info', `Canceled before anything was sent to ${label}`, scope)
+      return
+    }
     if (canceled) {
       this.store.setTarget(t.id, { status: 'unconfirmed', error: 'Canceled mid-publish. Check the platform before retrying.' })
       this.store.log('warn', `Canceled while publishing to ${label}`, scope)
       return
     }
-    // Plugins written in plain JS signal the kind by error name, so match on either.
-    const is = (cls: { name: string; prototype: Error }, name: string) => e instanceof (cls as never) || e?.name === name
+    e.message = forPeople(e.message)
     if (is(UnconfirmedError, 'UnconfirmedError')) {
       this.store.setTarget(t.id, { status: 'unconfirmed', error: e.message, remoteId: (e as UnconfirmedError).remoteId ?? null })
       this.store.log('warn', `${label}: ${e.message} (marked unconfirmed, will not re-send)`, scope)
@@ -382,7 +494,7 @@ export class Engine {
     if (is(NeedsLoginError, 'NeedsLoginError')) {
       this.store.setAccountStatus(account.id, 'needs_login', e.message)
       this.store.setTarget(t.id, { status: 'failed', error: `Reconnect ${account.name}, then retry. ${e.message}` })
-      this.store.log('error', `${label}: login expired`, scope)
+      this.store.log('error', `${label}: signed out; reconnect it, then retry`, scope)
       return
     }
     if (is(RetryableError, 'RetryableError') && attempts < MAX_ATTEMPTS) {
@@ -392,7 +504,15 @@ export class Engine {
       this.store.log('warn', `${label}: ${e.message}; retry ${attempts}/${MAX_ATTEMPTS - 1} at ${next}`, scope)
       return
     }
-    const kind = is(ContentError, 'ContentError') ? 'Content rejected' : is(VerificationRequiredError, 'VerificationRequiredError') ? 'Needs you' : 'Failed'
+    // Out of retries: "OneDraft will try again" no longer holds.
+    if (is(RetryableError, 'RetryableError')) e.message = `${e.message.replace(/\s*OneDraft will try again[^.]*\./, '')} Press Retry to try again.`
+    const kind = is(ContentError, 'ContentError')
+      ? 'Content rejected'
+      : is(VerificationRequiredError, 'VerificationRequiredError')
+        ? 'Needs you'
+        : is(RetryableError, 'RetryableError')
+          ? `Failed after ${attempts} tries`
+          : 'Failed'
     this.store.setTarget(t.id, { status: 'failed', error: `${kind}: ${e.message}`, nextAttemptAt: null })
     this.store.log('error', `${label}: ${kind}: ${e.message}`, scope)
   }

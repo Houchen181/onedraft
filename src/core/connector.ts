@@ -29,6 +29,12 @@ export interface LoopbackOptions {
   timeoutMs?: number
 }
 
+export interface WebCookie {
+  name: string
+  value: string
+  domain: string
+}
+
 export interface LoopbackResult {
   code: string
   redirectUri: string
@@ -52,7 +58,19 @@ export interface ConnectorContext {
   oauthLoopback(opts: LoopbackOptions): Promise<LoopbackResult>
   openExternal(url: string): Promise<void>
   /** Persistent Playwright browser profile, one per account (or per pending login). */
-  browser(profileKey: string, opts?: { headless?: boolean }): Promise<BrowserContext>
+  browser(profileKey: string, opts?: { headless?: boolean; locale?: string }): Promise<BrowserContext>
+  /**
+   * Sign in like in any browser: opens a plain window (no automation attached, so sites like Google don't refuse
+   * it) on `url` with the profile `profileKey`, and resolves once `signedIn` says the cookies show a login (the
+   * window then closes by itself). Rejects if the person closes the window first.
+   */
+  signInWindow?(profileKey: string, url: string, signedIn: (cookies: WebCookie[]) => boolean): Promise<WebCookie[]>
+  /** Sign out of a browser profile: close its windows and delete it (its cookies are the sign-in). */
+  forgetBrowser?(profileKey: string): Promise<void>
+  /** Show a QR code in the Connect window, with what to do with it (replaces the previous one). */
+  showQr?(text: string, note?: string): void
+  /** Tell the Connect window what is happening now (replaces a QR code shown earlier). */
+  connectStatus?(note: string): void
   exec(
     command: string,
     args: string[],
@@ -89,6 +107,8 @@ export interface PublishResult {
    */
   state: 'published' | 'scheduled' | 'processing' | 'handoff'
   note?: string
+  /** For a handoff in a window OneDraft opened: settles, with a new note, once the person closes that window. */
+  closed?: Promise<string>
 }
 
 export interface AccountCheck {
@@ -99,8 +119,8 @@ export interface AccountCheck {
 
 export interface Connector {
   manifest: PlatformManifest
-  /** Extra platform-specific checks on top of the manifest constraints. */
-  validate?(content: ResolvedContent): Issue[]
+  /** Extra platform-specific checks on top of the manifest constraints, for the account the post goes to. */
+  validate?(content: ResolvedContent, account?: Account): Issue[]
   /** Adjust the manifest to the platform's settings (e.g. X Premium's longer posts). Called at start and on changes. */
   applySettings?(setting: (key: string) => string | undefined): void
   /** Interactive login. `input` holds the values of manifest.connectFields. */
@@ -146,6 +166,17 @@ export class RetryableError extends Error {
   ) {
     super(message)
     this.name = 'RetryableError'
+  }
+}
+
+/**
+ * Stopped by Cancel before anything reached the platform (e.g. while OneDraft filled in a website's form, which the
+ * person submits themselves): the post is simply canceled, not "may already be live".
+ */
+export class CanceledError extends Error {
+  constructor(message = 'Canceled.') {
+    super(message)
+    this.name = 'CanceledError'
   }
 }
 

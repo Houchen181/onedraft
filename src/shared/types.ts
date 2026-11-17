@@ -269,6 +269,21 @@ export interface PlatformManifest {
   notes: string[]
   /** What happens when the person presses Connect, in one plain sentence (default: by connector kind). */
   signIn?: string
+  /**
+   * The platform can also be connected by signing in on its website in a window OneDraft keeps (no developer app):
+   * posts are filled in on the site's own upload page and the person presses Post. Offered first when present;
+   * `signIn`/`guide`/`connectFields` then describe the official-API way.
+   */
+  web?: {
+    signIn: string
+    /** Fields asked for when connecting this way. */
+    fields?: FieldSpec[]
+    notes?: string[]
+    /** Keys of `options` that apply to posts made this way (the rest belong to the official API). */
+    options?: string[]
+    /** Where the website takes other media than the API (merged over `constraints`, group by group). */
+    constraints?: Partial<Constraints>
+  }
   /** Step-by-step walkthrough of the one-time setup on the platform's site (its own developer app). */
   guide?: SetupGuide
   /** Developer documentation, for plugins without a guide. */

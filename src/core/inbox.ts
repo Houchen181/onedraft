@@ -113,10 +113,10 @@ export class Inbox {
     return this.engine.registry.has(platform) ? this.engine.connector(platform).manifest.name : platform
   }
 
-  /** Connected accounts on platforms whose comments OneDraft can read. */
+  /** Connected accounts on platforms whose comments OneDraft can read (not ones signed in on the website: no API). */
   accounts(): Account[] {
     return this.engine.store.listAccounts().filter((a) => {
-      if (!this.engine.registry.has(a.platform)) return false
+      if (!this.engine.registry.has(a.platform) || a.meta.method === 'web') return false
       const c = this.engine.connector(a.platform)
       return !!c.listComments && c.manifest.capabilities.comments
     })
@@ -127,7 +127,8 @@ export class Inbox {
       checking: !!this.running,
       lastCheckedAt: this.lastCheckedAt,
       everyMin: this.opts.everyMin?.() ?? 0,
-      problems: this.problems,
+      // Problems of accounts that went away or moved to the website since that check no longer apply.
+      problems: this.problems.filter((p) => this.accounts().some((a) => a.id === p.accountId)),
       open: this.engine.store.countOpenComments()
     }
   }
@@ -221,6 +222,7 @@ export class Inbox {
     const a = this.engine.mustAccount(comment.accountId)
     const c = this.engine.connector(a.platform)
     if (!c.reply || !c.manifest.capabilities.reply) throw new Error(`${c.manifest.name} replies are not available through OneDraft.`)
+    if (a.meta.method === 'web') throw new Error(`${a.name} is signed in on the ${c.manifest.name} website: reply on ${c.manifest.name} itself, or connect the account with the Official API.`)
     // A double click must not answer twice.
     if (this.sending.has(key)) throw new Error('Already sending a reply to this comment.')
     this.sending.add(key)
@@ -240,6 +242,8 @@ export class Inbox {
   /** Can this target have numbers yet? Live on its platform, with an id, on a platform that reports them. */
   hasStats(t: Target): boolean {
     if (!t.remoteId || !this.engine.registry.has(t.platform)) return false
+    // An account signed in on the website has no API to ask (its old API posts included).
+    if (this.engine.store.getAccount(t.accountId)?.meta.method === 'web') return false
     const live = t.status === 'published' || (t.status === 'scheduled' && !!t.scheduledAt && new Date(t.scheduledAt).getTime() <= Date.now())
     const c = this.engine.connector(t.platform)
     return live && !!c.stats && c.manifest.capabilities.stats

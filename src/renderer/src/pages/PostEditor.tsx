@@ -387,7 +387,20 @@ export function PostEditor({ postId: initialId, seedMedia, onCreated }: { postId
           <div className="pe-grp">Posting to</div>
           {!posting.length && <div className="small faint" style={{ padding: '4px 10px' }}>Switch on a platform below.</div>}
           {posting.map((r) => (
-            <button key={r.p.id} className={`pe-item ${sel === r.p.id ? 'on' : ''}`} onClick={() => setSel(r.p.id)}>
+            // A div, not a button: it holds the on/off switch, and a button can't hold another one.
+            <div
+              key={r.p.id}
+              role="button"
+              tabIndex={0}
+              className={`pe-item ${sel === r.p.id ? 'on' : ''}`}
+              onClick={() => setSel(r.p.id)}
+              onKeyDown={(e) => {
+                if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+                  e.preventDefault()
+                  setSel(r.p.id)
+                }
+              }}
+            >
               <PlatformIcon p={r.p} />
               <span className="t">
                 <b>
@@ -396,13 +409,25 @@ export function PostEditor({ postId: initialId, seedMedia, onCreated }: { postId
                 <small>{r.account!.name}</small>
               </span>
               {!r.locked && <Toggle on onChange={() => toggle(r, false)} title={`Remove ${r.p.name} from this post`} />}
-            </button>
+            </div>
           ))}
           {rows.some((r) => !r.included) && <div className="pe-grp">Not in this post</div>}
           {rows
             .filter((r) => !r.included)
             .map((r) => (
-              <button key={r.p.id} className={`pe-item off ${sel === r.p.id ? 'on' : ''}`} onClick={() => setSel(r.p.id)}>
+              <div
+                key={r.p.id}
+                role="button"
+                tabIndex={0}
+                className={`pe-item off ${sel === r.p.id ? 'on' : ''}`}
+                onClick={() => setSel(r.p.id)}
+                onKeyDown={(e) => {
+                  if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+                    e.preventDefault()
+                    setSel(r.p.id)
+                  }
+                }}
+              >
                 <PlatformIcon p={r.p} />
                 <span className="t">
                   <b>{r.p.name}</b>
@@ -411,7 +436,8 @@ export function PostEditor({ postId: initialId, seedMedia, onCreated }: { postId
                 {r.account ? (
                   <Toggle on={false} onChange={() => toggle(r, true)} title={`Add ${r.p.name} to this post`} />
                 ) : (
-                  <span
+                  <button
+                    type="button"
                     className="btn sm"
                     onClick={(e) => {
                       e.stopPropagation()
@@ -419,9 +445,9 @@ export function PostEditor({ postId: initialId, seedMedia, onCreated }: { postId
                     }}
                   >
                     Connect
-                  </span>
+                  </button>
                 )}
-              </button>
+              </div>
             ))}
         </nav>
 
@@ -632,6 +658,15 @@ function PlatformPanel(props: {
   const { row, m, variant: v, onChange } = props
   const { p, account, target } = row
   const k = p.constraints
+  // An account signed in on the website posts through the site's page: only the options that way uses, and its notes.
+  const viaWeb = account?.meta.method === 'web' && !!p.web
+  const options = viaWeb
+    ? p.options
+        .filter((o) => p.web?.options?.includes(o.key))
+        // Required by the API, a reminder on the website: the person sets it on the site's own page.
+        .map((o) => (o.required ? { ...o, required: false, help: `Optional here: you choose this on ${p.name}’s own page, and OneDraft reminds you of what you pick.` } : o))
+    : p.options
+  const notes = viaWeb ? (p.web?.notes ?? []) : p.notes
   const [mode, setMode] = useState('blur')
   const n = customCount(v)
   const band = (
@@ -671,9 +706,9 @@ function PlatformPanel(props: {
               </>
             )}
           </div>
-          {p.notes.length > 0 && (
+          {notes.length > 0 && (
             <div className="note">
-              {p.notes.map((x) => (
+              {notes.map((x) => (
                 <div key={x}>• {x}</div>
               ))}
             </div>
@@ -702,7 +737,7 @@ function PlatformPanel(props: {
               Open on {p.name} ↗
             </a>
           )}
-          {p.capabilities.comments && isLive(t) && (
+          {p.capabilities.comments && isLive(t) && !viaWeb && (
             <a href="#" onClick={() => app.go('inbox', t.postId)}>
               Comments
             </a>
@@ -739,7 +774,7 @@ function PlatformPanel(props: {
               <div className="small faint">{props.progress.note}</div>
             </div>
           )}
-          {canHaveStats(t, p) && <TargetStatsStrip target={t} platform={p} stats={props.stats} />}
+          {canHaveStats(t, p, account) && <TargetStatsStrip target={t} platform={p} stats={props.stats} />}
         </div>
       )}
       <fieldset disabled={row.locked} style={{ border: 0, padding: 0, margin: 0 }}>
@@ -832,11 +867,11 @@ function PlatformPanel(props: {
               </div>
             </div>
           )}
-          {p.options.length > 0 && (
+          {options.length > 0 && (
             <div>
               <FieldHead label={`${p.name} options`} />
               <div className="opts">
-                {p.options.map((o) => (
+                {options.map((o) => (
                   <Field key={o.key} spec={o} value={v.options?.[o.key]} onChange={(val) => onChange({ options: { ...(v.options ?? {}), [o.key]: val } })} />
                 ))}
               </div>
@@ -872,9 +907,9 @@ function PlatformPanel(props: {
               ✨ Suggest {TAGS_LABEL[p.id]?.toLowerCase() ?? 'tags'}
             </button>
           </div>
-          {p.notes.length > 0 && (
+          {notes.length > 0 && (
             <div className="note">
-              {p.notes.map((x) => (
+              {notes.map((x) => (
                 <div key={x}>• {x}</div>
               ))}
             </div>

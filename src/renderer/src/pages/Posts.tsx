@@ -39,7 +39,7 @@ export function Posts() {
   const [reading, setReading] = useState(false)
   const test = FILTERS.find((f) => f[0] === filter)![2]
   const shown = (posts ?? []).filter(test)
-  const withNumbers = (posts ?? []).some((p) => p.targets.some((t) => canHaveStats(t, app.platform(t.platform))))
+  const withNumbers = (posts ?? []).some((p) => p.targets.some((t) => canHaveStats(t, app.platform(t.platform), app.accounts.find((a) => a.id === t.accountId))))
   const refreshNumbers = async () => {
     setReading(true)
     try {

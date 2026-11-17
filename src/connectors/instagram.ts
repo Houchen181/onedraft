@@ -8,6 +8,7 @@ import { MediaHost } from '../core/mediahost'
 import { captionWithHashtags } from '../core/validate'
 import type { Comment } from '../shared/types'
 import { body, explain, fileSize, isVideo, readChunk } from './util'
+import { isWeb, WEB_SELECTOR_SETTING, webCheck, webConnect, webDisconnect, webIssues, webManifest, webPublish } from './web'
 
 interface IgSecret {
   accessToken: string
@@ -132,9 +133,11 @@ export const instagram: Connector = {
       image: { maxCount: 20, maxBytes: 8e6, formats: ['jpg', 'jpeg'], preferredAspect: '4:5' },
       media: { required: true, mixed: false, maxVideos: 1 }
     },
-    settings: [
-      { key: 'graphVersion', label: 'Graph API version', type: 'text', default: 'v27.0' }
-    ],
+    settings: [{ key: 'graphVersion', label: 'Graph API version', type: 'text', default: 'v27.0' }, WEB_SELECTOR_SETTING],
+    web: webManifest('instagram', ['Photo posts work without a media host this way.'], ['format'], {
+      image: { maxCount: 10, maxBytes: undefined, formats: ['jpg', 'jpeg', 'png', 'webp'], preferredAspect: '4:5' },
+      media: { required: true, mixed: true, maxVideos: 10 }
+    }),
     connectFields: [
       {
         key: 'accessToken',
@@ -220,8 +223,14 @@ export const instagram: Connector = {
     ]
   },
 
+  validate(content, account) {
+    return account && isWeb(account) ? webIssues('instagram', content) : []
+  },
+
   async connect(ctx, input) {
-    const accessToken = input.accessToken.trim()
+    if (input.method === 'web' || (!input.method && input._profileKey)) return webConnect('instagram', ctx, input)
+    const accessToken = (input.accessToken ?? '').trim()
+    if (!accessToken) throw new Error('Paste the access token first (step 5).')
     ctx.secrets.set({ accessToken, obtainedAt: Date.now() } satisfies IgSecret)
     const me = await graph<{ user_id?: string; id: string; username: string; name?: string; profile_picture_url?: string; account_type?: string }>(ctx, '/me', {
       fields: 'user_id,username,name,profile_picture_url,account_type'
@@ -244,12 +253,15 @@ export const instagram: Connector = {
     }
   },
 
-  async check(ctx) {
+  async check(ctx, account) {
+    if (isWeb(account)) return webCheck('instagram', ctx, account)
     const me = await graph<{ username: string }>(ctx, '/me', { fields: 'username' })
     return { ok: true, name: me.username }
   },
 
-  async publish(ctx, account, { content }) {
+  async publish(ctx, account, req) {
+    if (isWeb(account)) return webPublish('instagram', ctx, account, req)
+    const { content } = req
     const igId = account.meta.igId as string
     const host = MediaHost.fromSettings((k) => ctx.globalSetting(k), ctx.fetch)
     const hosted: string[] = []
@@ -362,5 +374,9 @@ export const instagram: Connector = {
       metric: 'views,reach,likes,comments,shares,saved,total_interactions'
     })
     return Object.fromEntries(r.data.map((m) => [m.name, m.total_value?.value ?? m.values?.[0]?.value ?? 0]))
+  },
+
+  async disconnect(ctx, account) {
+    if (isWeb(account)) await webDisconnect(ctx, account)
   }
 }

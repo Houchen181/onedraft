@@ -85,6 +85,61 @@ From the docs, without signing in to any console; the walkthroughs live in each 
   support yet. Older apps still work: Instagram-login tokens start with `IGAA`, last 60 days and refresh with
   `ig_refresh_token`. Development mode is enough for your own account (Standard Access, no App Review).
 
+## Connecting without developer apps (2026-11-17)
+After people hit the developer-app setups: YouTube, TikTok, Instagram and X also connect by **signing in on the
+website** (`src/connectors/web.ts`), the default; the official APIs stay as the advanced way.
+- **Sign-in window**: a plain Edge/Chrome started on the account's profile with `--remote-debugging-port` only (no
+  `--enable-automation`, no page attached), because Google and others refuse or challenge automated sign-ins. OneDraft
+  reads cookies over a browser-level DevTools connection and closes the window when the login cookie appears:
+  YouTube `LOGIN_INFO` (.youtube.com), TikTok `sessionid`/`sid_tt`, Instagram `sessionid` (id in `ds_user_id`),
+  X `auth_token` (id in `twid`). Posting uses Playwright on the same profile, launched without `--enable-automation`
+  and with `AutomationControlled` off (`navigator.webdriver` is false), and hands the filled-in page to the person.
+- **Upload pages** (`WEB_SELECTORS`, from maintained uploaders' source, 2026-11, not yet run against signed-in
+  pages): YouTube `www.youtube.com/upload` → `input[name=Filedata]`, `#title-textarea #textbox`,
+  `#description-textarea #textbox`, `VIDEO_MADE_FOR_KIDS_(NOT_)MFK` radios, `#next-button` ×3, `#privacy-radios`
+  (social-auto-upload, QianFan-Sync, youtube-uploader; `#hashtag` suggestions cover Next: Escape). TikTok
+  `tiktokstudio/upload` (no iframe now) → `input[accept="video/*"]`, wait for `[data-e2e=caption_container]`,
+  Draft.js caption; type hashtags one by one (pasted ones stay plain and can stall the editor); tours/tips to dismiss
+  (QianFan-Sync, tiktok-uploader). Instagram → New post → (Post) → dialog `input[accept*="video/mp4"]` (photos too,
+  ≤ 10), Reels OK, Next ×2 (heading changes), Lexical caption `[data-lexical-editor=true]` (social-auto-upload,
+  MultiPost, opencli). X `compose/post` → `fileInput`, wait for `attachments` before the text (a late upload resets
+  Draft.js), `tweetTextarea_0` (opencli, baoyu-skills). Sign-in cookies: YouTube `LOGIN_INFO` is dropped on cookie
+  rotation, `__Secure-3PAPISID` isn't (yt-dlp); TikTok also `sessionid_ss`; X `auth_token` + `ct0`.
+- **TikTok developer apps**: apps created after 2024-09-09 must verify the Terms, Privacy and Web/Desktop URLs
+  (domain or URL-prefix signature file); in Sandbox this applies once the Content Posting API is added. github.com
+  URLs can't be verified (a `/blob/` page isn't the raw file); a GitHub Pages site you own can. So that way needs a
+  website of your own.
+- **Bilibili**: `biliup login` is an interactive menu (dialoguer) and exits with "not a terminal" when started from an
+  app. OneDraft does the same TV QR-code login itself (`passport-tv-login/qrcode/auth_code` and `/poll`, biliup's TV
+  app key, md5 sign of the sorted query) and writes biliup's `LoginInfo` file, so uploads and `renew` keep working.
+- **Pressure test (2026-11-17, before 0.1.3)**: four parallel runs (code review; real Edge headless; fixture pages
+  served by Playwright routing; the built app driven end to end) found what these rely on, now in the code and
+  `test/web-accounts.test.ts`:
+  - A WebSocket silently drops what is sent after it closed, so a DevTools client must reject on close, or a sign-in
+    window closed by the person leaves Connect waiting forever. Closing Edge's last window ends the browser ~0.2 s later.
+  - A fresh Edge profile signs in to the Windows work/school Microsoft account even with `--disable-sync` (and gets
+    Bing/MSN/M365 cookies): `--disable-features=msImplicitSignin` stops it. Playwright's own launches don't do it.
+    Playwright also passes `--edge-skip-compat-layer-relaunch` and `--do-not-de-elevate` (Edge may restart itself).
+  - Cookie domains must match on a dot boundary (`auth_token` on `.notx.com` or `.dropbox.com` is not X's).
+  - An expired session shows the site's sign-in page: YouTube → `accounts.google.com`, TikTok → `/login`, X →
+    `/i/flow/login`, Instagram keeps `instagram.com/` and shows the sign-in form (a password box gives it away).
+  - X's `/compose/post` is a dialog over the Home timeline, whose own composer has the same test ids: scope to
+    `[role=dialog]`. Without a `dialog` listener Playwright answers the site's alerts and "Leave site?" itself.
+  - Bilibili TV QR codes didn't expire within 7 minutes (always 86039); one dropped poll shouldn't end the login.
+- **Second pressure test (same day)**, on the fixed version:
+  - Playwright launches Chromium with `--no-sandbox` unless `chromiumSandbox: true`; with `--enable-automation`
+    removed nothing hides Chromium's "unsupported command-line flag" bar either. The posting windows are the
+    person's: sandbox on, and Playwright's test-only "unsafe" switches left out.
+  - Edge's implicit sign-in also happens in Playwright's windows: the first launch on a fresh profile signed it in to
+    the Windows work/school account (its email as the profile's user, 13 Bing/MSN cookies). A browser takes only the
+    last `--disable-features`, so OneDraft repeats Playwright's list (1.65) and adds `msImplicitSignin`.
+  - `--remote-debugging-port` lets any local program (other Windows users included) read a profile's cookies while
+    the window is open; `--remote-debugging-pipe` (fds 3/4, NUL-terminated JSON) keeps DevTools to OneDraft.
+  - A natively scheduled target keeps status `scheduled` after its time: "still to go out" needs `scheduled_at > now`.
+  - bsdtar killed mid-unpack leaves a truncated exe: unpack beside the target and move it into place when complete.
+  - PowerShell's `-WorkingDirectory` takes wildcards (`[`/`]` need escaping); `Start-Process` with a `.cmd` lets cmd.exe
+    re-parse the arguments.
+
 ## China AI-labelling rules
 The CAC's Measures for Labeling AI-Generated Synthetic Content, in force since 2025-09-01: users must declare AI content with the platform's tool.
 

@@ -4,7 +4,8 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, Notification, protocol, safeStorage, shell, Tray } from 'electron'
 import { execFile } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
@@ -92,11 +93,22 @@ async function main() {
   applySettings()
 
   const browsers = new BrowserManager(paths.profiles, () => settingString(store, 'rednote.browserChannel') ?? 'msedge')
+  // Browser profiles no account uses any more (OneDraft closed in the middle of a sign-in, or before a Disconnect
+  // could finish) can still hold a sign-in: they go. Listed now, before anything can start a new one; only names
+  // OneDraft makes itself are touched.
+  {
+    const used = new Set(store.listAccounts().map((a) => a.meta.profileKey))
+    const orphans = (existsSync(paths.profiles) ? readdirSync(paths.profiles) : []).filter(
+      (name) => /^(youtube|tiktok|instagram|x|rednote)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(name) && !used.has(name)
+    )
+    for (const name of orphans) void rm(join(paths.profiles, name), { recursive: true, force: true, maxRetries: 3, retryDelay: 500 }).catch(() => undefined)
+  }
   const makeContext = makeContextFactory({
     store,
     browsers,
     paths,
-    onProgress: (scope, fraction, note) => send('progress', { scope, fraction, note })
+    onProgress: (scope, fraction, note) => send('progress', { scope, fraction, note }),
+    onConnect: (platform, show) => send('connect', { platform, ...show })
   })
   const mediaTools = {
     ffmpeg: settingString(store, 'app.ffmpegPath') || unpacked(ffmpegStatic ?? 'ffmpeg'),
@@ -285,7 +297,9 @@ async function main() {
       if (pending.has('events') && Notification.isSupported()) {
         for (const e of store.listEvents(20).filter((x) => x.id > lastEventId).reverse()) {
           if (/^(Published|Scheduled|Ready for you)/.test(e.message) || (e.level === 'error' && e.scope)) {
-            new Notification({ title: e.level === 'error' ? 'OneDraft: a post failed' : 'OneDraft', body: e.message.slice(0, 200) }).show()
+            const n = new Notification({ title: e.level === 'error' ? 'OneDraft: a post failed' : 'OneDraft', body: e.message.slice(0, 200) })
+            n.on('click', () => openPage('posts'))
+            n.show()
           }
         }
         lastEventId = store.listEvents(1)[0]?.id ?? lastEventId
@@ -319,12 +333,6 @@ async function main() {
       }
     },
     'accounts.cancelConnect': (platform: string) => connecting.get(platform)?.abort(),
-    'accounts.reconnect': async (id: string) => {
-      const a = engine.mustAccount(id)
-      const input: Record<string, string> = { label: a.name }
-      if (a.meta.profileKey) input._profileKey = String(a.meta.profileKey)
-      return engine.connect(a.platform, input)
-    },
     'accounts.check': (id: string) => engine.checkAccount(id),
     'accounts.remove': (id: string) => engine.removeAccount(id),
     'posts.list': () => store.listPosts(),
@@ -522,8 +530,9 @@ async function main() {
   setTimeout(runBackgroundCheck, 20_000)
   setInterval(
     () => {
+      // API logins (refresh tokens). Accounts signed in on a website are checked when they post: a check would open a browser.
       for (const a of store.listAccounts()) {
-        if (registry.has(a.platform) && registry.get(a.platform).manifest.kind === 'api') void engine.checkAccount(a.id)
+        if (registry.has(a.platform) && registry.get(a.platform).manifest.kind === 'api' && a.meta.method !== 'web') void engine.checkAccount(a.id)
       }
     },
     6 * 3600_000
@@ -534,8 +543,15 @@ async function main() {
   if (!startHidden || !tray) createWindow()
 
   app.on('second-instance', showWindow)
-  app.on('before-quit', () => {
+  let browsersClosed = false
+  app.on('before-quit', (e) => {
     quitting = true
+    // Close OneDraft's browser windows properly first (Windows would end them with OneDraft, and they'd offer to
+    // restore their pages next time), but never hold up quitting for more than a few seconds.
+    if (browsersClosed || !browsers.hasWindows()) return
+    e.preventDefault()
+    browsersClosed = true
+    void Promise.race([browsers.closeAll(), new Promise((r) => setTimeout(r, 5000))]).finally(() => app.quit())
   })
   app.on('will-quit', () => {
     void mcp.stop()

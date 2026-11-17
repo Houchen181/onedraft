@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 
-type Channel = 'changed' | 'progress' | 'agent' | 'approval' | 'approval-closed' | 'navigate'
-const CHANNELS: Channel[] = ['changed', 'progress', 'agent', 'approval', 'approval-closed', 'navigate']
+type Channel = 'changed' | 'progress' | 'agent' | 'approval' | 'approval-closed' | 'navigate' | 'connect'
+const CHANNELS: Channel[] = ['changed', 'progress', 'agent', 'approval', 'approval-closed', 'navigate', 'connect']
 
 const api = {
   call: (method: string, ...args: unknown[]) => ipcRenderer.invoke('call', method, ...args),

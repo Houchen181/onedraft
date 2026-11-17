@@ -351,8 +351,8 @@ export function Settings() {
   /** The walkthrough is done once its keys are saved (a token pasted at every Connect never is). */
   const setupDone = (p: PlatformManifest) =>
     !!p.guide && !missing(p).length && !p.guide.steps.some((s) => s.fields?.some((k) => p.connectFields.some((f) => f.key === k)))
-  const signInOnly = app.platforms.filter((p) => !p.guide)
-  const withSetup = app.platforms.filter((p) => p.guide)
+  const signInOnly = app.platforms.filter((p) => !p.guide || p.web)
+  const withSetup = app.platforms.filter((p) => p.guide && !p.web)
   const acctAction = async (id: string, fn: () => Promise<unknown>, ok?: string) => {
     setBusyAcct(id)
     try {
@@ -482,7 +482,7 @@ export function Settings() {
                     Not connected
                     <span className="effort">
                       {' · '}
-                      {!p.guide ? 'just sign in' : setupDone(p) ? 'setup done, ready to connect' : `one-time setup first (${p.guide.time})`}
+                      {!p.guide || p.web ? 'just sign in' : setupDone(p) ? 'setup done, ready to connect' : `one-time setup first (${p.guide.time})`}
                     </span>
                   </div>
                 )}

@@ -117,22 +117,25 @@ encrypted with Windows' own protection (Electron `safeStorage`).
 
 ## Connect your accounts
 
-In Settings → Platforms, press **Connect** next to a platform. OneDraft walks you through it in the app: which
-page to open, what to click, what to type and where to paste each key, with a Copy button for every value and a
-check that catches the usual copy-paste mix-ups.
+In Settings → Platforms, press **Connect** next to a platform and sign in. No developer accounts or keys:
 
-| Platform | What connecting takes | Good to know |
+| Platform | Connecting | Posting |
 |---|---|---|
-| Rednote | Sign in: a browser window opens; scan the QR code with the Rednote app | OneDraft fills the note and you press Publish (Rednote penalises automated accounts). |
-| Bilibili | Sign in: scan a QR code with the Bilibili app (the first time, OneDraft downloads [biliup](https://github.com/biliup/biliup), MIT) | Turn on the AI-content declaration in the creator centre yourself. |
-| YouTube | A one-time setup in Google Cloud (free, about 10 minutes), then sign in with Google | While your Google app is in Testing, Google signs OneDraft out every 7 days. 100 uploads a day. |
-| X | A one-time setup in X's developer console (about 10 minutes), then sign in with X | X bills you directly: buy API credits (from $5), then about $0.015 per post, $0.20 with a link. |
-| TikTok | A one-time setup on TikTok for Developers (about 15 minutes), then sign in with TikTok | TikTok approves apps only for companies, so yours stays in its Sandbox: OneDraft sends videos to your TikTok drafts and you post them from the app. |
-| Instagram | A one-time setup on Meta for Developers (about 15 minutes) for a Business or Creator account; paste the token it gives you | Meta apps created after late October 2026 get a new setup OneDraft can't use yet. Photo posts also need a public media host (Settings → Media host). |
+| Rednote | A browser window opens on Rednote's creator site; scan the QR code with the Rednote app | OneDraft fills in the note and you press Publish (Rednote penalises automated accounts). |
+| Bilibili | A QR code appears in OneDraft; scan it with the Bilibili app (the first time, OneDraft downloads [biliup](https://github.com/biliup/biliup), MIT) | OneDraft uploads by itself. Turn on the AI-content declaration in the creator centre yourself. |
+| YouTube, TikTok, Instagram, X | A browser window opens on the site's sign-in page; sign in as usual and it closes by itself | OneDraft opens the site's own upload page, signed in as you, with your media attached and text filled in, and you press Post. |
 
-Why YouTube, X, TikTok and Instagram need a setup: they only let apps post through their official APIs, and each
-app needs its own key from the platform. OneDraft has no company or server behind it, so you make that key once,
-and it stays on your computer. Research behind these choices: [docs/platform-research-2026-11.md](docs/platform-research-2026-11.md).
+The sign-in window is a plain browser window: OneDraft only watches it for the sign-in and attaches no automation
+to it, so Google and the others treat it like any browser. OneDraft keeps one browser profile per account, so the
+sign-in lasts.
+
+**Official API (advanced).** YouTube, X, TikTok and Instagram can instead be connected through their official APIs,
+which lets OneDraft post without you pressing Post and read comments and numbers into the Inbox. Each needs a
+developer app of your own, and Connect → *Official API* walks you through it step by step. Know before you start:
+Google signs OneDraft out every 7 days while your Google app is in Testing; X bills you per post (API credits from
+$5); TikTok only takes web addresses on a website you own and verified, and keeps personal apps in a Sandbox where
+videos go to your drafts; Meta apps created after late October 2026 can't use the Instagram login OneDraft needs.
+Research behind these choices: [docs/platform-research-2026-11.md](docs/platform-research-2026-11.md).
 
 ## The assistant: your Claude plan or an API key
 

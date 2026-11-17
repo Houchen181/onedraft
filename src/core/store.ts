@@ -75,6 +75,7 @@ create table if not exists targets (
   updated_at text not null
 );
 create index if not exists targets_due on targets(status, next_attempt_at);
+create index if not exists targets_post on targets(post_id);
 create table if not exists settings (
   key text primary key,
   value text,
@@ -146,6 +147,9 @@ create table if not exists stats (
 /** Comments joined to the OneDraft post they are on (if it went out through OneDraft). */
 const COMMENT_SELECT = `select c.*, t.id as target_id, t.post_id as post_id from comments c
   left join targets t on t.rowid = (select t2.rowid from targets t2 where t2.account_id = c.account_id and t2.remote_id = c.post_remote_id limit 1)`
+
+/** Comments of accounts signed in on the website are kept but not shown: there is no API to answer them with. */
+const NOT_ON_WEBSITE = `c.account_id not in (select id from accounts where json_extract(meta, '$.method') = 'web')`
 
 const now = () => new Date().toISOString()
 const json = (v: unknown) => JSON.stringify(v ?? null)
@@ -229,7 +233,8 @@ export class Store {
   }): Account {
     const existing = this.db.prepare('select id, remote_user_id from accounts where platform = ? order by created_at limit 1').get(a.platform) as Row | undefined
     const id = (existing?.id as string) ?? randomUUID()
-    // Another person's login: the old account's comments are not theirs to answer.
+    // Another person's login: the old account's comments are not theirs to answer. (Switching the same account
+    // between the website and the API keeps them; they're hidden while it's signed in on the website.)
     if (existing && existing.remote_user_id !== a.remoteUserId) {
       this.db.prepare('delete from comments where account_id = ?').run(id)
       this.db.prepare('delete from comment_cursors where account_id = ?').run(id)
@@ -362,10 +367,23 @@ export class Store {
     return this.toPost(r, targets)
   }
 
+  /**
+   * The newest `limit` posts, plus every post still waiting to go out (however long ago it was last edited):
+   * queued or publishing, or scheduled on its platform for a time still ahead.
+   */
   listPosts(limit = 200): Post[] {
-    const rows = this.db.prepare('select * from posts order by updated_at desc limit ?').all(limit) as Row[]
+    const rows = this.db
+      .prepare(
+        `select * from posts where id in (select id from posts order by updated_at desc limit ?)
+           or id in (select post_id from targets where status in ('queued', 'publishing')
+                     or (status = 'scheduled' and (scheduled_at is null or scheduled_at > ?)))
+         order by updated_at desc`
+      )
+      .all(limit, now()) as Row[]
+    if (!rows.length) return []
     const byPost = new Map<string, Target[]>()
-    for (const t of this.db.prepare('select * from targets order by rowid').all() as Row[]) {
+    const ids = JSON.stringify(rows.map((r) => r.id))
+    for (const t of this.db.prepare('select * from targets where post_id in (select value from json_each(?)) order by rowid').all(ids) as Row[]) {
       const target = this.toTarget(t)
       byPost.set(target.postId, [...(byPost.get(target.postId) ?? []), target])
     }
@@ -489,6 +507,27 @@ export class Store {
     this.changed('posts')
   }
 
+  /**
+   * Correct several targets at once (one transaction), e.g. at startup: their posts keep their place in the
+   * list, unlike setTarget, which counts as an edit.
+   */
+  markTargets(changes: { id: string; status?: TargetStatus; error: string | null; clearNext?: boolean }[]) {
+    if (!changes.length) return
+    const at = now()
+    const run = this.db.prepare(
+      'update targets set status = coalesce(?, status), error = ?, next_attempt_at = case when ? then null else next_attempt_at end, updated_at = ? where id = ?'
+    )
+    this.db.exec('begin')
+    try {
+      for (const c of changes) run.run(c.status ?? null, c.error, c.clearNext ? 1 : 0, at, c.id)
+      this.db.exec('commit')
+    } catch (e) {
+      this.db.exec('rollback')
+      throw e
+    }
+    this.changed('posts')
+  }
+
   private touchPost(postId: string) {
     this.db.prepare('update posts set updated_at = ? where id = ?').run(now(), postId)
   }
@@ -542,6 +581,18 @@ export class Store {
   /** Targets interrupted mid-publish (app quit or crashed). */
   stuckTargets(): Target[] {
     return (this.db.prepare(`select * from targets where status = 'publishing'`).all() as Row[]).map((r) => this.toTarget(r))
+  }
+
+  /** An account's targets in these states. */
+  targetsOfAccount(accountId: string, statuses: TargetStatus[]): Target[] {
+    return (this.db.prepare('select * from targets where account_id = ? and status in (select value from json_each(?))').all(accountId, JSON.stringify(statuses)) as Row[]).map((r) =>
+      this.toTarget(r)
+    )
+  }
+
+  /** Every target in one state (e.g. 'handoff'). */
+  targetsByStatus(status: TargetStatus): Target[] {
+    return (this.db.prepare('select * from targets where status = ?').all(status) as Row[]).map((r) => this.toTarget(r))
   }
 
   // ---------- events ----------
@@ -645,7 +696,7 @@ export class Store {
   listComments(opts: { limit?: number; accountId?: string; state?: CommentState } = {}): InboxComment[] {
     const rows = this.db
       .prepare(
-        `${COMMENT_SELECT} where (? is null or c.account_id = ?) and (? is null or c.state = ?)
+        `${COMMENT_SELECT} where (? is null or c.account_id = ?) and (? is null or c.state = ?) and ${NOT_ON_WEBSITE}
          order by coalesce(c.published_at, c.first_seen_at) desc, c.first_seen_at desc limit ?`
       )
       .all(opts.accountId ?? null, opts.accountId ?? null, opts.state ?? null, opts.state ?? null, opts.limit ?? 500) as Row[]
@@ -653,7 +704,7 @@ export class Store {
   }
 
   countOpenComments(): number {
-    return Number((this.db.prepare(`select count(*) as n from comments where state = 'open'`).get() as Row).n)
+    return Number((this.db.prepare(`select count(*) as n from comments c where c.state = 'open' and ${NOT_ON_WEBSITE}`).get() as Row).n)
   }
 
   /**

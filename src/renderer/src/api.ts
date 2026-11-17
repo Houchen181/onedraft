@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-type Channel = 'changed' | 'progress' | 'agent' | 'approval' | 'approval-closed' | 'navigate'
+type Channel = 'changed' | 'progress' | 'agent' | 'approval' | 'approval-closed' | 'navigate' | 'connect'
 
 interface Bridge {
   call(method: string, ...args: unknown[]): Promise<unknown>

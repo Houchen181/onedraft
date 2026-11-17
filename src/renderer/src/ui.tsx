@@ -1,8 +1,8 @@
 // Small shared UI pieces.
 
-import { createContext, useContext, useState, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { Account, FieldSpec, PlatformManifest, SettingsView, TargetStatus } from '@shared/types'
-import { call, fileName, isVideoPath, mediaUrl, useData } from './api'
+import { call, fileName, isVideoPath, mediaUrl, on, useData } from './api'
 
 export interface AppCtx {
   toast(text: string, error?: boolean): void
@@ -121,19 +121,39 @@ function CopyValue({ label, value }: { label: string; value: string }) {
 export function ConnectDialog({ platform: p, onClose, onSaved }: { platform: PlatformManifest; onClose: () => void; onSaved?: () => void }) {
   const app = useApp()
   const existing = app.accountFor(p.id)
-  const g = p.guide
+  // Platforms you can connect by signing in on their website offer that first: no developer app needed.
+  const [method, setMethod] = useState<'web' | 'api'>(() =>
+    !p.web ? 'api' : existing && existing.meta.method !== 'web' ? 'api' : 'web'
+  )
+  const web = method === 'web' && !!p.web
+  const g = web ? undefined : p.guide
+  const fields = web ? (p.web?.fields ?? []) : p.connectFields
   const { data: settings, reload } = useData<SettingsView>('settings.get', [])
   /** Setup values typed here (setting keys without the platform prefix), saved on Connect or Close. */
   const [typed, setTyped] = useState<Record<string, unknown>>({})
   const [input, setInput] = useState<Record<string, unknown>>(
-    Object.fromEntries(p.connectFields.filter((f) => f.default !== undefined).map((f) => [f.key, f.default]))
+    Object.fromEntries([...p.connectFields, ...(p.web?.fields ?? [])].filter((f) => f.default !== undefined).map((f) => [f.key, f.default]))
   )
   const [busy, setBusy] = useState(false)
+  /** Cancel takes Connect's place: it answers only after a moment, so a double click doesn't cancel right away. */
+  const [armed, setArmed] = useState(false)
+  /** Pressed Cancel: the sign-in ending then isn't an error to show. */
+  const canceled = useRef(false)
   const [error, setError] = useState<string>()
   const [showSteps, setShowSteps] = useState<boolean>()
+  /** What the platform asks to show while signing in (a QR code to scan). */
+  const [shown, setShown] = useState<{ qr?: string; note?: string }>()
+  useEffect(
+    () =>
+      on('connect', (m) => {
+        const x = m as { platform?: string; qr?: string; note?: string }
+        if (x.platform === p.id) setShown({ qr: x.qr, note: x.note })
+      }),
+    [p.id]
+  )
 
   const settingSpec = (k: string) => p.settings.find((s) => s.key === k)
-  const connectSpec = (k: string) => p.connectFields.find((s) => s.key === k)
+  const connectSpec = (k: string) => fields.find((s) => s.key === k)
   const saved = (k: string) => settings?.values[`${p.id}.${k}`]
   const secretSaved = (k: string) => !!settings?.secretsSet.includes(`${p.id}.${k}`)
   const filled = (v: unknown) => v !== undefined && v !== null && String(v).trim() !== ''
@@ -141,10 +161,10 @@ export function ConnectDialog({ platform: p, onClose, onSaved }: { platform: Pla
   const fill = (k: string) => String(typed[k] ?? saved(k) ?? settingSpec(k)?.default ?? '')
 
   const guideKeys = new Set(g?.steps.flatMap((s) => s.fields ?? []) ?? [])
-  const missingSettings = p.settings.filter((s) => s.required && !hasSetting(s))
-  const missingInput = p.connectFields.filter((f) => f.required && !filled(input[f.key]))
+  const missingSettings = web ? [] : p.settings.filter((s) => s.required && !hasSetting(s))
+  const missingInput = fields.filter((f) => f.required && !filled(input[f.key]))
   // Steps start open while there is something to do in them (a key to paste, or a token every time).
-  const stepsOpen = !!g && (showSteps ?? (missingSettings.length > 0 || p.connectFields.some((f) => guideKeys.has(f.key))))
+  const stepsOpen = !!g && (showSteps ?? (missingSettings.length > 0 || fields.some((f) => guideKeys.has(f.key))))
   const stepOf = (k: string) => (g ? g.steps.findIndex((s) => s.fields?.includes(k)) + 1 : 0)
   const todo = [...missingSettings, ...missingInput]
   /** "First paste the Client ID and the Client secret (step 6)." */
@@ -165,23 +185,31 @@ export function ConnectDialog({ platform: p, onClose, onSaved }: { platform: Pla
     reload()
     onSaved?.()
   }
+  // Setup values belong to the Official API way: signing in on the website doesn't save what was typed there.
   const close = () => {
-    void persist().catch((e: Error) => app.toast(e.message, true))
+    if (!web) void persist().catch((e: Error) => app.toast(e.message, true))
     onClose()
   }
   const connect = async () => {
     setBusy(true)
     setError(undefined)
+    setShown(undefined)
+    canceled.current = false
+    setArmed(false)
+    const arm = setTimeout(() => setArmed(true), 700)
     try {
-      await persist()
-      const values = Object.fromEntries(Object.entries(input).map(([k, v]) => [k, String(v ?? '').trim()]))
+      if (!web) await persist()
+      const values: Record<string, string> = Object.fromEntries(fields.map((f) => [f.key, String(input[f.key] ?? '').trim()]))
+      if (p.web) values.method = method
       const a = await call<Account>('accounts.connect', p.id, values)
       app.toast(`${p.name} connected as ${a.name}.`)
       onClose()
     } catch (e) {
-      setError((e as Error).message)
+      if (!canceled.current) setError((e as Error).message)
     } finally {
+      clearTimeout(arm)
       setBusy(false)
+      setShown(undefined)
     }
   }
 
@@ -203,15 +231,36 @@ export function ConnectDialog({ platform: p, onClose, onSaved }: { platform: Pla
       </div>
     )
   }
-  const signIn = p.signIn ?? HOW[p.kind]
+  const signIn = web ? p.web!.signIn : (p.signIn ?? HOW[p.kind])
+  const notes = web ? (p.web?.notes ?? []) : p.notes
 
   return (
-    <Modal onClose={busy ? undefined : close} wide={!!g}>
+    <Modal onClose={busy ? undefined : close} wide={!!g || !!p.web}>
       <div className="row" style={{ marginBottom: 6 }}>
         <PlatformIcon p={p} size={34} />
         <h2 style={{ margin: 0 }}>{existing ? `Replace your ${p.name} account` : `Connect ${p.name}`}</h2>
       </div>
       {existing && <div className="note" style={{ marginBottom: 10 }}>OneDraft keeps one account per platform. Signing in again replaces {existing.name}; drafts and scheduled posts move to the new account.</div>}
+      {p.web && (
+        <div className="methods" role="radiogroup" aria-label="How to connect">
+          <label className={`method${web ? ' on' : ''}`}>
+            <input type="radio" name="method" checked={web} disabled={busy} onChange={() => setMethod('web')} />
+            <div>
+              <b>Sign in with your browser</b> <span className="pill ok">no setup</span>
+              <div className="small muted">
+                A window opens where you sign in to {p.name} as usual. When you post, OneDraft fills in the post on {p.name}’s own page and you press Post.
+              </div>
+            </div>
+          </label>
+          <label className={`method${!web ? ' on' : ''}`}>
+            <input type="radio" name="method" checked={!web} disabled={busy} onChange={() => setMethod('api')} />
+            <div>
+              <b>Official API</b> <span className="pill">advanced{p.guide ? ` · ${p.guide.time} setup` : ''}</span>
+              <div className="small muted">Needs a developer app of your own. OneDraft then posts by itself and reads comments and numbers.</div>
+            </div>
+          </label>
+        </div>
+      )}
       {g && !settings ? (
         <p className="muted">Loading…</p>
       ) : g ? (
@@ -278,11 +327,20 @@ export function ConnectDialog({ platform: p, onClose, onSaved }: { platform: Pla
         <p className="muted">{rich(signIn, fill)}</p>
       )}
       <div className="stack">
-        {p.connectFields.filter((f) => !(stepsOpen && guideKeys.has(f.key))).map((f) => fieldFor(f.key))}
-        {p.notes.length > 0 && (
+        {/* What's typed while signing in wouldn't be used: the fields wait. */}
+        <fieldset className="stack plain" disabled={busy}>
+          {fields.filter((f) => !(stepsOpen && guideKeys.has(f.key))).map((f) => fieldFor(f.key))}
+        </fieldset>
+        {busy && shown?.qr && (
+          <div className="qrbox">
+            <img src={shown.qr} alt="Sign-in QR code" />
+            {shown.note && <div>{shown.note}</div>}
+          </div>
+        )}
+        {notes.length > 0 && (
           <div className="note">
             <b>Good to know</b>
-            {p.notes.map((n) => (
+            {notes.map((n) => (
               <div key={n}>• {n}</div>
             ))}
           </div>
@@ -308,10 +366,23 @@ export function ConnectDialog({ platform: p, onClose, onSaved }: { platform: Pla
       <div className="actions">
         {busy ? (
           <>
-            <span className="muted small" style={{ alignSelf: 'center' }}>
-              Waiting for you to finish signing in…
+            <span className="muted small grow" style={{ alignSelf: 'center' }}>
+              {shown?.qr
+                ? 'Waiting for you to scan the code and confirm on your phone…'
+                : shown?.note
+                  ? shown.note
+                  : web
+                    ? `Sign in to ${p.name} in the window that opened. It closes by itself once you’re in.`
+                    : 'Waiting for you to finish signing in…'}
             </span>
-            <button className="btn" onClick={() => void call('accounts.cancelConnect', p.id)}>
+            <button
+              className="btn"
+              disabled={!armed}
+              onClick={() => {
+                canceled.current = true
+                void call('accounts.cancelConnect', p.id)
+              }}
+            >
               Cancel
             </button>
           </>
@@ -489,7 +560,25 @@ export function Counter({ n, max }: { n: number; max?: number }) {
   )
 }
 
+/** Open modals, innermost last: Escape closes only the innermost one. */
+const openModals: { current?: () => void }[] = []
+
 export function Modal({ children, onClose, wide }: { children: ReactNode; onClose?: () => void; wide?: boolean }) {
+  const close = useRef(onClose)
+  close.current = onClose
+  useEffect(() => {
+    openModals.push(close)
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || openModals[openModals.length - 1] !== close || !close.current) return
+      e.preventDefault()
+      close.current()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      openModals.splice(openModals.indexOf(close), 1)
+    }
+  }, [])
   return (
     <div className="backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose?.()}>
       <div className={`modal${wide ? ' wide' : ''}`}>{children}</div>

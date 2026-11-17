@@ -6,6 +6,7 @@ import { ContentError, NeedsLoginError, RetryableError, UnconfirmedError, type C
 import { check, expiresSoon, form, sleep, type OAuthTokens } from '../core/http'
 import { captionWithHashtags } from '../core/validate'
 import { body, explain, fileSize, mimeOf, readChunk, requireSetting, singleFlight } from './util'
+import { isWeb, WEB_SELECTOR_SETTING, webCheck, webConnect, webDisconnect, webManifest, webPublish } from './web'
 
 const API = 'https://open.tiktokapis.com/v2'
 const CHUNK = 10_000_000
@@ -102,14 +103,21 @@ export const tiktok: Connector = {
         type: 'number',
         default: 53682,
         help: 'Only if another program uses 53682. Change the Desktop redirect URI on TikTok to match (http://127.0.0.1:<port>/callback/).'
-      }
+      },
+      WEB_SELECTOR_SETTING
     ],
     signIn:
       'Your browser opens TikTok. Sign in with the TikTok account you added as a target user and press **Authorize**. Then come back here.',
     guide: {
-      why: 'TikTok only lets apps post through its API, and every app needs its own key. You make a developer app of your own, once. TikTok approves apps only for companies, so yours stays in its “Sandbox”: OneDraft sends each video to your TikTok drafts, and you post it from the TikTok app.',
-      need: ['An email address for a TikTok for Developers account (it’s separate from your TikTok login)', 'Your TikTok account and its password'],
-      time: 'about 15 minutes',
+      why: 'TikTok’s API needs a developer app of your own. TikTok approves apps only for companies, so yours stays in its “Sandbox”: OneDraft sends each video to your TikTok drafts, and you post it from the TikTok app.',
+      warning:
+        'This way needs a website of your own: TikTok only accepts web addresses on the app form that it has verified you own (github.com pages can’t be verified). If you don’t have one, choose “Sign in with your browser” above instead.',
+      need: [
+        'An email address for a TikTok for Developers account (it’s separate from your TikTok login)',
+        'Your TikTok account and its password',
+        'A website you can put a file on, such as a free GitHub Pages site (https://yourname.github.io)'
+      ],
+      time: 'about 30 minutes',
       steps: [
         {
           text: 'Sign up for TikTok for Developers with your email: press **Send code to email**, type the code and finish signing up.',
@@ -124,14 +132,15 @@ export const tiktok: Connector = {
           text: 'Switch the toggle next to the app name to **Sandbox**, press **Create Sandbox**, name it **OneDraft** and press **Confirm**. Do every step below in the Sandbox.'
         },
         {
-          text: 'Fill in the app details. App icon: OneDraft’s icon (button below) or any square picture. Category: **Productivity**, or the closest. Paste the description and the addresses below. Under Platforms tick **Desktop** and paste the website address there.',
+          text: 'Verify your website: under **URL properties** press **Verify properties**, choose **URL prefix**, enter your site’s address (ending in /), download the signature file, put it on your site at that address, check it opens in your browser, then press **Verify**.',
+          detail:
+            'Put OneDraft’s terms and privacy policy on the same site (open them with the button below and copy the text). Leave the signature file there: TikTok checks it again later.',
+          link: { label: 'Open OneDraft’s terms and privacy text', url: 'https://github.com/Houchen181/onedraft/tree/main/docs' }
+        },
+        {
+          text: 'Fill in the app details. App icon: OneDraft’s icon (button below) or any square picture. Category: **Productivity**, or the closest. Paste the description below. For **Terms of Service URL**, **Privacy Policy URL** and the **Desktop** website (under Platforms, tick **Desktop**) use the pages on your verified site.',
           icon: 1024,
-          copy: [
-            { label: 'Description', value: 'OneDraft is a desktop app I use to post my own videos to my own TikTok account.' },
-            { label: 'Terms of Service URL', value: 'https://github.com/Houchen181/onedraft/blob/main/docs/terms.md' },
-            { label: 'Privacy Policy URL', value: 'https://github.com/Houchen181/onedraft/blob/main/docs/privacy.md' },
-            { label: 'Desktop website', value: 'https://github.com/Houchen181/onedraft' }
-          ]
+          copy: [{ label: 'Description', value: 'OneDraft is a desktop app I use to post my own videos to my own TikTok account.' }]
         },
         {
           text: 'Under Products press **Add products**, add **Login Kit** and **Content Posting API**, then **Done**. In Login Kit open **Redirect URI**, choose the **Desktop** tab and paste the address below exactly, with the / at the end. In Content Posting API turn on **Direct Post**.',
@@ -150,6 +159,10 @@ export const tiktok: Connector = {
         }
       ],
       trouble: [
+        {
+          problem: '“This URL is not verified”',
+          fix: 'TikTok only takes addresses on a site you verified (step 4); github.com addresses can’t be verified. Use your own site, or choose “Sign in with your browser” at the top instead.'
+        },
         { problem: 'TikTok says the client_key is wrong', fix: 'You copied the Production keys. Switch the toggle next to the app name to Sandbox and copy the Client key and Client secret shown there.' },
         {
           problem: 'TikTok says the redirect_uri doesn’t match',
@@ -169,6 +182,10 @@ export const tiktok: Connector = {
         }
       ]
     },
+    web: webManifest('tiktok', ['Posts can be public, and TikTok’s own page lets you schedule them.'], ['privacyLevel'], {
+      caption: { max: 4000 },
+      video: { minSec: 3, maxSec: 3600, maxBytes: undefined, preferredAspect: '9:16', formats: ['mp4', 'mov', 'webm'] }
+    }),
     connectFields: [],
     options: [
       {
@@ -219,7 +236,8 @@ export const tiktok: Connector = {
     ]
   },
 
-  async connect(ctx) {
+  async connect(ctx, input) {
+    if (input.method === 'web' || (!input.method && input._profileKey)) return webConnect('tiktok', ctx, input)
     const clientKey = requireSetting(ctx.setting, 'clientKey', 'the TikTok client key')
     const clientSecret = requireSetting(ctx.setting, 'clientSecret', 'the TikTok client secret')
     const r = await ctx.oauthLoopback({
@@ -280,12 +298,15 @@ export const tiktok: Connector = {
     }
   },
 
-  async check(ctx) {
+  async check(ctx, account) {
+    if (isWeb(account)) return webCheck('tiktok', ctx, account)
     const c = await call<{ creator_nickname?: string }>(ctx, '/post/publish/creator_info/query/', {}, 'TikTok creator info')
     return { ok: true, name: c.creator_nickname }
   },
 
-  async publish(ctx, account, { content }) {
+  async publish(ctx, account, req) {
+    if (isWeb(account)) return webPublish('tiktok', ctx, account, req)
+    const { content } = req
     const o = content.options
     const file = content.media[0]
     const size = fileSize(file)
@@ -385,7 +406,8 @@ export const tiktok: Connector = {
     return Object.fromEntries(Object.entries(v).filter(([, n]) => typeof n === 'number')) as Record<string, number>
   },
 
-  async disconnect(ctx) {
+  async disconnect(ctx, account) {
+    if (isWeb(account)) return webDisconnect(ctx, account)
     const t = ctx.secrets.get<OAuthTokens>()
     const key = ctx.setting('clientKey')
     const secret = ctx.setting('clientSecret')

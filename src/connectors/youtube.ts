@@ -10,6 +10,7 @@ import {
 import { check, expiresSoon, form, getJson, HttpError, secondsToPacificMidnight, sleep, type OAuthTokens } from '../core/http'
 import type { Account, Comment } from '../shared/types'
 import { body, explain, fileSize, mimeOf, readChunk, requireSetting } from './util'
+import { isWeb, WEB_SELECTOR_SETTING, webCheck, webConnect, webDisconnect, webManifest, webPublish } from './web'
 
 const API = 'https://www.googleapis.com/youtube/v3'
 const UPLOAD = 'https://www.googleapis.com/upload/youtube/v3'
@@ -125,7 +126,8 @@ export const youtube: Connector = {
         placeholder: 'GOCSPX-…',
         pattern: '^GOCSPX-[\\w-]+$',
         mismatch: 'A Google Client secret starts with GOCSPX- (only very old ones don’t). Check you copied the secret, not the Client ID.'
-      }
+      },
+      WEB_SELECTOR_SETTING
     ],
     signIn:
       'Your browser opens Google. Pick the Google account that owns your channel. Google warns “Google hasn’t verified this app”: that is expected for an app you made yourself. Press **Continue** (or **Advanced**, then **Go to OneDraft (unsafe)**), tick every box and press **Continue**.',
@@ -198,6 +200,7 @@ export const youtube: Connector = {
         { problem: 'Publish app is greyed out', fix: 'Google wants a home page and privacy policy link first, and sometimes still refuses. You can skip it: OneDraft just asks you to sign in again once a week.' }
       ]
     },
+    web: webManifest('youtube', ['If your channel belongs to a Brand Account and YouTube asks which channel to use when you post, pick it there.'], ['privacy', 'madeForKids']),
     connectFields: [],
     options: [
       {
@@ -223,7 +226,8 @@ export const youtube: Connector = {
     ]
   },
 
-  async connect(ctx) {
+  async connect(ctx, input) {
+    if (input.method === 'web' || (!input.method && input._profileKey)) return webConnect('youtube', ctx, input)
     const clientId = requireSetting(ctx.setting, 'clientId', 'the YouTube OAuth client ID')
     const r = await ctx.oauthLoopback({
       authorizeUrl: ({ redirectUri, state, codeChallenge }) =>
@@ -295,12 +299,15 @@ export const youtube: Connector = {
     }
   },
 
-  async check(ctx) {
+  async check(ctx, account) {
+    if (isWeb(account)) return webCheck('youtube', ctx, account)
     const ch = await api<{ items?: Channel[] }>(ctx, '/channels?part=snippet&mine=true')
     return { ok: !!ch.items?.length, name: ch.items?.[0]?.snippet.title }
   },
 
-  async publish(ctx, _account, { content, publishAt }) {
+  async publish(ctx, account, req) {
+    if (isWeb(account)) return webPublish('youtube', ctx, account, req)
+    const { content, publishAt } = req
     const file = content.media[0]
     const size = fileSize(file)
     const privacy = publishAt ? 'private' : String(content.options.privacy ?? 'public')
@@ -314,7 +321,7 @@ export const youtube: Connector = {
       status: {
         privacyStatus: privacy,
         ...(publishAt ? { publishAt: new Date(publishAt).toISOString() } : {}),
-        selfDeclaredMadeForKids: Boolean(content.options.madeForKids),
+        selfDeclaredMadeForKids: content.options.madeForKids === true || content.options.madeForKids === 'true',
         containsSyntheticMedia: content.aiGenerated
       }
     }
@@ -449,7 +456,8 @@ export const youtube: Connector = {
     return Object.fromEntries(Object.entries(s).map(([k, v]) => [k, Number(v)]))
   },
 
-  async disconnect(ctx) {
+  async disconnect(ctx, account) {
+    if (isWeb(account)) return webDisconnect(ctx, account)
     const t = ctx.secrets.get<OAuthTokens>()
     if (t?.refreshToken) {
       await ctx.fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(t.refreshToken)}`, { method: 'POST' }).catch(() => undefined)

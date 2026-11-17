@@ -131,7 +131,8 @@ export const rednote: Connector = {
     settings: [
       {
         key: 'browserChannel',
-        label: 'Browser',
+        label: 'Browser for website accounts',
+        help: 'Used for Rednote and for every account connected by signing in on the website (YouTube, TikTok, Instagram, X).',
         type: 'select',
         default: 'msedge',
         options: [
@@ -175,18 +176,32 @@ export const rednote: Connector = {
   },
 
   async connect(ctx, input) {
+    const fresh = !input._profileKey
     const key = input._profileKey || `rednote-${randomUUID()}`
-    const browser = await ctx.browser(key, { headless: false })
-    const page = browser.pages()[0] ?? (await browser.newPage())
+    const canceled = () => new Error('Sign-in canceled.')
+    const closedEarly = () => new Error('The sign-in window was closed before you finished signing in. Press Connect to try again.')
+    let browser: BrowserContext | undefined
+    let page: Page | undefined
+    // Cancel closes the page, which also ends one that is still loading.
+    const onAbort = () => void page?.close().catch(() => undefined)
+    ctx.signal?.addEventListener('abort', onAbort, { once: true })
     try {
+      browser = await ctx.browser(key, { headless: false, locale: 'zh-CN' })
+      page = browser.pages()[0] ?? (await browser.newPage())
+      if (ctx.signal?.aborted) throw canceled()
       await page.goto(`${CREATOR}/login`, { waitUntil: 'domcontentloaded' })
       ctx.log('Scan the QR code in the browser window with the Rednote app (switch to QR-code login if needed).')
       const deadline = Date.now() + 5 * 60_000
-      while (Date.now() < deadline) {
-        await page.waitForTimeout(2000)
-        if (!page.url().includes('/login') && (await isLoggedIn(page, ctx))) break
+      let signedIn = false
+      while (!signedIn && Date.now() < deadline) {
+        if (ctx.signal?.aborted) throw canceled()
+        if (page.isClosed()) throw closedEarly()
+        await new Promise((r) => setTimeout(r, 2000))
+        // Signed in = on Rednote's creator site, past its login page, with no login box showing (an error page or
+        // any other site doesn't count).
+        signedIn = !page.isClosed() && page.url().startsWith(`${CREATOR}/`) && !page.url().includes('/login') && (await isLoggedIn(page, ctx).catch(() => false))
       }
-      if (page.url().includes('/login')) throw new Error('Not logged in after 5 minutes.')
+      if (!signedIn) throw new Error('Not signed in after 5 minutes. Press Connect to try again.')
       const cookies = await browser.cookies(CREATOR)
       const uid = cookies.find((c) => /user.?id/i.test(c.name))?.value
       return {
@@ -194,13 +209,29 @@ export const rednote: Connector = {
         remoteUserId: uid ?? key,
         meta: { profileKey: key }
       }
+    } catch (e) {
+      const m = String((e as Error)?.message ?? e)
+      const reason = ctx.signal?.aborted
+        ? canceled()
+        : page?.isClosed() || /has been closed|frame was detached/i.test(m)
+          ? closedEarly()
+          : /net::ERR_/.test(m)
+            ? new Error(`Couldn’t open Rednote (${/net::ERR_\w+/.exec(m)?.[0]}). Check the internet connection and press Connect again.`)
+            : (e as Error)
+      // A new profile that never got signed in is just clutter (and may hold half a sign-in).
+      if (fresh) {
+        await browser?.close().catch(() => undefined)
+        await ctx.forgetBrowser?.(key).catch(() => undefined)
+      }
+      throw reason
     } finally {
-      await browser.close().catch(() => undefined)
+      ctx.signal?.removeEventListener('abort', onAbort)
+      await browser?.close().catch(() => undefined)
     }
   },
 
   async check(ctx, account) {
-    const browser = await ctx.browser(profileKey(account), { headless: true })
+    const browser = await ctx.browser(profileKey(account), { headless: true, locale: 'zh-CN' })
     try {
       const page = await browser.newPage()
       await page.goto(`${CREATOR}/publish/publish?from=homepage&target=video`, { waitUntil: 'domcontentloaded' })
@@ -219,7 +250,7 @@ export const rednote: Connector = {
     let browser: BrowserContext | undefined
     let page: Page | undefined
     try {
-      browser = await ctx.browser(profileKey(account), { headless: false })
+      browser = await ctx.browser(profileKey(account), { headless: false, locale: 'zh-CN' })
       // A fresh tab each time: an earlier handoff may still be open with a note waiting for the person.
       page = browser.pages().find((p) => p.url() === 'about:blank') ?? (await browser.newPage())
       await page.goto(`${CREATOR}/publish/publish?from=homepage&target=${video ? 'video' : 'image'}`, { waitUntil: 'domcontentloaded' })
@@ -323,5 +354,10 @@ export const rednote: Connector = {
     } finally {
       await browser?.close().catch(() => undefined)
     }
+  },
+
+  /** Disconnecting signs out: the browser profile (its cookies are the sign-in) is deleted. */
+  async disconnect(ctx, account) {
+    await ctx.forgetBrowser?.(profileKey(account))
   }
 }

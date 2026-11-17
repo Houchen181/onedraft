@@ -160,6 +160,7 @@ export const TOOLS: ToolDef[] = [
       return engine.store
         .listPosts(limit ?? 30)
         .filter((p) => !status || p.status === status)
+        .slice(0, limit ?? 30)
         .map((p) => ({ id: p.id, status: p.status, title: p.title || p.body.slice(0, 60), scheduledAt: p.scheduledAt, targets: p.targets.map((t) => `${t.platform}:${t.status}`) }))
     }
   }),
@@ -594,6 +595,7 @@ Pass projectId to change an existing generated video. Rendering takes about 2 s 
       const a = engine.mustAccount(accountId)
       const c = engine.connector(a.platform)
       if (!c.listComments) return { error: `${c.manifest.name} comments are not available through OneDraft.` }
+      if (a.meta.method === 'web') return { error: `${a.name} is signed in on the ${c.manifest.name} website; reading comments needs the Official API way.` }
       const list = (await c.listComments(engine.makeContext(a.platform, a, a.id), a, { remoteId, limit })) ?? []
       inboxOf(env).save(a, list.map((x) => ({ ...x, postRemoteId: x.postRemoteId ?? remoteId })))
       return list
@@ -620,6 +622,7 @@ Pass projectId to change an existing generated video. Rendering takes about 2 s 
       const a = env.engine.mustAccount(accountId)
       const c = env.engine.connector(a.platform)
       if (!c.reply) return { error: `${c.manifest.name} replies are not available through OneDraft.` }
+      if (a.meta.method === 'web') return { error: `${a.name} is signed in on the ${c.manifest.name} website; replying needs the Official API way.` }
       const ok = await env.requestApproval({ title: `Reply on ${c.manifest.name} as ${a.name}?`, detail: text, source: env.source })
       if (!ok) return { sent: false, message: 'The person declined.' }
       // A comment in the Inbox gets marked as answered there.
@@ -639,6 +642,8 @@ Pass projectId to change an existing generated video. Rendering takes about 2 s 
       const inbox = inboxOf(env)
       if (!inbox.hasStats(t)) {
         const name = env.engine.registry.has(t.platform) ? env.engine.connector(t.platform).manifest.name : t.platform
+        if (env.engine.store.getAccount(t.accountId)?.meta.method === 'web')
+          return { error: `That account is signed in on the ${name} website; numbers need the Official API way. ${name} shows them on the post itself.` }
         return { error: t.status === 'scheduled' ? 'Not live yet: it is scheduled on the platform.' : `${name} stats are not available.` }
       }
       await inbox.refreshStats([targetId])

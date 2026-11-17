@@ -2,7 +2,7 @@
 // (src/core/inbox.ts normalizeStats); this file only labels, sums and displays them.
 
 import { useEffect, useMemo, useState } from 'react'
-import type { PlatformManifest, Target, TargetStats } from '@shared/types'
+import type { Account, PlatformManifest, Target, TargetStats } from '@shared/types'
 import { call, useData } from './api'
 import { timeAgo, useApp } from './ui'
 
@@ -76,7 +76,8 @@ export const isLive = (t: Target) =>
   !!t.remoteId && (t.status === 'published' || (t.status === 'scheduled' && !!t.scheduledAt && new Date(t.scheduledAt).getTime() <= Date.now()))
 
 /** Can this target have numbers yet? Live on a platform that reports them. */
-export const canHaveStats = (t: Target, p?: PlatformManifest) => isLive(t) && !!p?.capabilities.stats
+/** Live, on a platform that reports numbers, through an account that can ask for them (not one signed in on the website). */
+export const canHaveStats = (t: Target, p?: PlatformManifest, account?: Account) => isLive(t) && !!p?.capabilities.stats && account?.meta.method !== 'web'
 
 /** Targets refreshed automatically this session, so switching panels doesn't fetch again and again. */
 const autoRefreshed = new Set<string>()

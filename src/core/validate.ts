@@ -90,7 +90,8 @@ export const measure = (s: string, unit: 'chars' | 'bytes' | 'weighted' | 'halfA
 const len = (s: string, unit: 'chars' | 'bytes' | 'weighted' = 'chars') =>
   unit === 'bytes' ? Buffer.byteLength(s, 'utf8') : unit === 'weighted' ? weightedLength(s) : [...s].length
 
-export function validateContent(manifest: PlatformManifest, c: ResolvedContent, media: MediaInfo[]): Issue[] {
+/** `opts.web`: the account posts through the platform's website (OneDraft fills in its page; no threads). */
+export function validateContent(manifest: PlatformManifest, c: ResolvedContent, media: MediaInfo[], opts: { web?: boolean } = {}): Issue[] {
   const k: Constraints = manifest.constraints
   const caps = manifest.capabilities
   const issues: Issue[] = []
@@ -107,7 +108,9 @@ export function validateContent(manifest: PlatformManifest, c: ResolvedContent, 
   const caption = k.tags?.style === 'hashtags' ? captionWithHashtags(c.caption, c.tags) : c.caption
   if (k.caption) {
     const n = len(caption, k.caption.unit)
-    if (n > k.caption.max && k.caption.overflow === 'thread' && c.options.thread !== false)
+    if (n > k.caption.max && k.caption.overflow === 'thread' && opts.web)
+      warn('caption', `Text is ${n} characters, over ${manifest.name}'s ${k.caption.max}. On the website it goes into one post: shorten it, or split it into a thread there before you post.`)
+    else if (n > k.caption.max && k.caption.overflow === 'thread' && c.options.thread !== false)
       warn('caption', `Text is ${n} characters, over ${manifest.name}'s ${k.caption.max}; it will go out as a thread of ${Math.ceil(n / (k.caption.max - 6))}.`)
     else if (n > k.caption.max)
       err('caption', `Caption is ${n} ${k.caption.unit ?? 'characters'} (with hashtags); ${manifest.name} allows ${k.caption.max}.`)

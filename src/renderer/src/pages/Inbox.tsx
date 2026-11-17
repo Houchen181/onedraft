@@ -37,8 +37,16 @@ export function Inbox({ postFilter, onClearFilter }: { postFilter?: string; onCl
   const [connectP, setConnectP] = useState<PlatformManifest>()
   const lastIndex = useRef(0)
 
-  const readable = app.accounts.filter((a) => app.platform(a.platform)?.capabilities.comments)
+  // Accounts signed in on the website have no API for comments.
+  const readable = app.accounts.filter((a) => a.meta.method !== 'web' && app.platform(a.platform)?.capabilities.comments)
   const unreadable = app.accounts.filter((a) => app.platform(a.platform) && !app.platform(a.platform)!.capabilities.comments)
+  const onWebsite = app.accounts.filter((a) => a.meta.method === 'web' && app.platform(a.platform)?.capabilities.comments)
+  const notReadText = [
+    unreadable.length ? unreadNote(unreadable.map((a) => app.platform(a.platform)?.name ?? a.platform)) : '',
+    onWebsite.length ? websiteNote(onWebsite.map((a) => app.platform(a.platform)?.name ?? a.platform)) : ''
+  ]
+    .filter(Boolean)
+    .join(' ')
   const postById = new Map((posts ?? []).map((p) => [p.id, p]))
   const all = comments ?? []
   const scoped = all.filter((c) => (platform === 'all' || c.platform === platform) && (!postFilter || c.postId === postFilter))
@@ -186,11 +194,11 @@ export function Inbox({ postFilter, onClearFilter }: { postFilter?: string; onCl
 
       {!readable.length ? (
         <div className="empty">
-          <p>Comments from YouTube, X and Instagram show up here, ready to answer.</p>
+          <p>Comments from YouTube, X and Instagram show up here, ready to answer, for accounts connected with the Official API.</p>
           <button className="btn primary" onClick={() => app.go('settings')}>
-            Connect a platform
+            {app.accounts.length ? 'Open Settings' : 'Connect a platform'}
           </button>
-          {unreadable.length > 0 && <p className="small faint">{unreadNote(unreadable.map((a) => app.platform(a.platform)?.name ?? a.platform))}</p>}
+          {notReadText && <p className="small faint">{notReadText}</p>}
         </div>
       ) : (
         <div className="ib-body">
@@ -223,7 +231,7 @@ export function Inbox({ postFilter, onClearFilter }: { postFilter?: string; onCl
                 </span>
               </button>
             ))}
-            {unreadable.length > 0 && <div className="small faint" style={{ padding: '14px 10px' }}>{unreadNote(unreadable.map((a) => app.platform(a.platform)?.name ?? a.platform))}</div>}
+            {notReadText && <div className="small faint" style={{ padding: '14px 10px' }}>{notReadText}</div>}
           </nav>
           <section className="ib-detail">
             {sel ? <Detail key={sel.key} c={sel} post={sel.postId ? postById.get(sel.postId) : undefined} /> : <div className="empty">{shown.length ? '' : 'Pick a comment on the left.'}</div>}
@@ -238,6 +246,11 @@ export function Inbox({ postFilter, onClearFilter }: { postFilter?: string; onCl
 function unreadNote(names: string[]) {
   const list = names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0]
   return `${list} ${names.length > 1 ? 'don’t' : 'doesn’t'} let apps read comments, so answer those in ${names.length > 1 ? 'their apps' : 'its app'}.`
+}
+
+function websiteNote(names: string[]) {
+  const list = names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0]
+  return `${list} ${names.length > 1 ? 'are' : 'is'} signed in on the website, so answer comments in ${names.length > 1 ? 'their apps' : 'its app'} (or connect with the Official API to answer here).`
 }
 
 function onWhat(c: InboxComment, posts: Map<string, Post>) {

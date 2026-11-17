@@ -21,6 +21,11 @@ describe('connecting', () => {
       it('has patterns that compile', () => {
         for (const f of [...m.settings, ...m.connectFields]) if (f.pattern) expect(() => new RegExp(f.pattern!), f.key).not.toThrow()
       })
+      it('can be connected by just signing in, unless it has a login of its own', () => {
+        // Rednote and Bilibili sign in directly; the platforms with an official API also offer the website way.
+        if (m.guide) expect(m.web?.signIn.length ?? 0, 'web sign-in').toBeGreaterThan(40)
+        for (const f of m.web?.fields ?? []) expect(f.required, f.key).toBeFalsy()
+      })
       if (!m.guide) return
       const g = m.guide
       const known = new Set([...m.settings.map((s) => s.key), ...m.connectFields.map((f) => f.key)])

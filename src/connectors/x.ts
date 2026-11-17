@@ -5,6 +5,7 @@ import { check, expiresSoon, form, getJson, HttpError, sleep, type OAuthTokens }
 import { weightedLength } from '../core/validate'
 import type { Comment } from '../shared/types'
 import { explain, fileSize, isVideo, mimeOf, readChunk, requireSetting, singleFlight, splitThread } from './util'
+import { isWeb, WEB_SELECTOR_SETTING, webCheck, webConnect, webDisconnect, webIssues, webManifest, webPublish } from './web'
 
 /** What usually went wrong when signing in, by the code X answers with. */
 const SIGN_IN_FIXES = {
@@ -119,7 +120,8 @@ export const x: Connector = {
         default: 53682,
         help: 'Only if another program uses 53682. Change the Callback URI on X to match (http://127.0.0.1:<port>/callback).'
       },
-      { key: 'premium', label: 'Account has X Premium (long posts)', type: 'boolean', default: false }
+      { key: 'premium', label: 'Account has X Premium (long posts)', type: 'boolean', default: false },
+      WEB_SELECTOR_SETTING
     ],
     signIn: 'Your browser opens X. Sign in as the account OneDraft should post as (if X asks) and press **Authorize app**. Then come back here.',
     guide: {
@@ -180,6 +182,7 @@ export const x: Connector = {
         { problem: 'X shows a blank page instead of “Authorize app”', fix: 'Sign in at x.com in the same browser first, then press Connect again.' }
       ]
     },
+    web: webManifest('x', ['No developer account and no API fees this way.']),
     connectFields: [],
     options: [
       { key: 'thread', label: 'Split long text into a thread', type: 'boolean', default: true, help: 'Otherwise text over the limit is an error.' }
@@ -190,13 +193,15 @@ export const x: Connector = {
     ]
   },
 
-  validate(content) {
+  validate(content, account) {
+    if (account && isWeb(account)) return webIssues('x', content)
     return /https?:\/\//.test(content.caption)
-      ? [{ level: 'warning', field: 'caption', message: 'X bills about $0.20 for a post with a link (vs ~$0.015 without).' }]
+      ? [{ level: 'warning', field: 'caption', message: 'Through the Official API, X bills about $0.20 for a post with a link (vs ~$0.015 without). Signing in with your browser costs nothing.' }]
       : []
   },
 
-  async connect(ctx) {
+  async connect(ctx, input) {
+    if (input.method === 'web' || (!input.method && input._profileKey)) return webConnect('x', ctx, input)
     const clientId = requireSetting(ctx.setting, 'clientId', 'the X client ID')
     const port = Number(ctx.setting('redirectPort') || 53682)
     const r = await ctx.oauthLoopback({
@@ -247,6 +252,7 @@ export const x: Connector = {
   // X bills every GET /2/users/me ($0.01), and the app checks logins every few hours: refreshing the token (free,
   // and refused once the login is revoked) is the check instead.
   async check(ctx, account) {
+    if (isWeb(account)) return webCheck('x', ctx, account)
     await accessToken(ctx)
     return { ok: true, name: account.name }
   },
@@ -257,7 +263,9 @@ export const x: Connector = {
     this.manifest.constraints.caption = { max: premium ? 25000 : 280, unit: 'weighted', overflow: 'thread' }
   },
 
-  async publish(ctx, account, { content }) {
+  async publish(ctx, account, req) {
+    if (isWeb(account)) return webPublish('x', ctx, account, req)
+    const { content } = req
     const max = ctx.setting('premium') === 'true' ? 25000 : 280
     const hashtags = content.tags.map((t) => `#${t.replace(/^#|\s+/g, '')}`).filter((t) => t.length > 1 && !content.caption.includes(t))
     const text = [content.caption.trim(), hashtags.join(' ')].filter(Boolean).join('\n\n')
@@ -350,5 +358,9 @@ export const x: Connector = {
   async stats(ctx, _account, remoteId) {
     const r = await api<{ data: { public_metrics?: Record<string, number> } }>(ctx, `/tweets/${remoteId}?tweet.fields=public_metrics`)
     return r.data.public_metrics ?? {}
+  },
+
+  async disconnect(ctx, account) {
+    if (isWeb(account)) await webDisconnect(ctx, account)
   }
 }

@@ -21,7 +21,7 @@ import type { ToolEnv } from '../core/tools'
 import type { ApprovalRequest, CompositionSpec, EditSpec, PostDraft } from '../shared/types'
 import { Agent, type AgentEvent } from './agent'
 import { BrowserManager } from './browser'
-import { claudeStatus, ClaudeCodeAgent, findClaude } from './claude-code'
+import { claudeStatus, ClaudeCodeAgent, findClaude, startSignIn } from './claude-code'
 import { renderComposition } from './composer'
 import { makeContextFactory, settingString, type Paths } from './context'
 import { OneDraftMcpServer } from './mcp-server'
@@ -419,6 +419,11 @@ async function main() {
     'agent.stop': () => agent().stop(),
     'agent.reset': () => agent().reset(),
     'agent.history': () => ({ items: agent().history(), busy: agent().busy, engine: engineName() }),
+    'ai.signIn': () => {
+      const cli = claudeCli()
+      if (!cli) throw new Error('Claude Code is not installed on this computer.')
+      startSignIn(cli)
+    },
     'ai.status': async () => ({
       engine: engineName(),
       engineSetting: settingString(store, 'ai.engine') ?? 'auto',

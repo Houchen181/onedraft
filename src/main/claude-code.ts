@@ -10,7 +10,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import type { Store } from '../core/store'
@@ -20,15 +20,62 @@ import { SYSTEM } from './agent'
 
 const CONVERSATION = 'claude-code'
 const PREFIX = 'mcp__onedraft__'
+const NOT_SIGNED_IN = 'Claude Code isn’t signed in yet. Open Settings → AI and press “Sign in to Claude Code” (once), then ask again.'
 
-export function findClaude(configured?: string): string | undefined {
+const list = (dir: string) => {
+  try {
+    return readdirSync(dir)
+  } catch {
+    return []
+  }
+}
+
+/**
+ * The Claude Code that comes inside the Claude desktop app (Windows), newest version first. The app keeps it in its
+ * own data folder and doesn't put it on PATH, so people who use Claude Code in the app have no `claude` command.
+ */
+export function desktopAppClaude(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  if (process.platform !== 'win32') return undefined
+  const roots: string[] = []
+  if (env.LOCALAPPDATA) {
+    // Microsoft Store install: %LOCALAPPDATA%\Claude-Data\claude_<id>\claude-code\<version>\<build>\claude.exe
+    for (const d of list(join(env.LOCALAPPDATA, 'Claude-Data'))) roots.push(join(env.LOCALAPPDATA, 'Claude-Data', d, 'claude-code'))
+    roots.push(join(env.LOCALAPPDATA, 'AnthropicClaude', 'claude-code'))
+  }
+  if (env.APPDATA) roots.push(join(env.APPDATA, 'Claude', 'claude-code'))
+  const found: { version: number[]; path: string }[] = []
+  for (const root of roots) {
+    for (const v of list(root)) {
+      const exe = [join(root, v, 'claude.exe'), ...list(join(root, v)).map((b) => join(root, v, b, 'claude.exe'))].find((p) => existsSync(p))
+      if (exe) found.push({ version: v.split(/[.-]/).map((x) => Number(x) || 0), path: exe })
+    }
+  }
+  const newer = (a: number[], b: number[]) => {
+    for (let i = 0; i < Math.max(a.length, b.length); i++) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) - (b[i] ?? 0)
+    return 0
+  }
+  return found.sort((a, b) => newer(b.version, a.version))[0]?.path
+}
+
+/** Claude Code to run: the path set in Settings, else `claude` on PATH, else the standard install, else the desktop app's. */
+export function findClaude(configured?: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
   const exe = process.platform === 'win32' ? 'claude.exe' : 'claude'
   const candidates = [
     configured?.trim(),
-    ...(process.env.PATH ?? '').split(delimiter).map((d) => d && join(d, exe)),
-    join(homedir(), '.local', 'bin', exe)
+    ...(env.PATH ?? '').split(delimiter).map((d) => d && join(d, exe)),
+    join(env.USERPROFILE || homedir(), '.local', 'bin', exe)
   ]
-  return candidates.find((c) => !!c && existsSync(c))
+  return candidates.find((c) => !!c && existsSync(c)) ?? desktopAppClaude(env)
+}
+
+/**
+ * Open Claude Code's own sign-in in a window of its own: the person signs in with their Claude account in the
+ * browser. OneDraft only starts it, and never sees the login.
+ */
+export function startSignIn(cli: string): void {
+  const p = spawn(cli, ['auth', 'login'], { env: childEnv(), detached: true, stdio: 'ignore', windowsHide: false })
+  p.on('error', () => undefined)
+  p.unref()
 }
 
 function childEnv(): NodeJS.ProcessEnv {
@@ -41,19 +88,23 @@ function childEnv(): NodeJS.ProcessEnv {
   return env
 }
 
-export async function claudeStatus(cli: string | undefined): Promise<{ found: boolean; path?: string; signedIn: boolean; method?: string; error?: string }> {
+export async function claudeStatus(
+  cli: string | undefined
+): Promise<{ found: boolean; path?: string; desktopApp?: boolean; signedIn: boolean; method?: string; error?: string }> {
   if (!cli) return { found: false, signedIn: false }
+  const desktopApp = cli === desktopAppClaude()
   return new Promise((resolve) => {
     const p = spawn(cli, ['auth', 'status'], { env: childEnv(), windowsHide: true })
     let out = ''
     p.stdout.on('data', (d) => (out += d))
-    p.on('error', (e) => resolve({ found: true, path: cli, signedIn: false, error: e.message }))
+    p.on('error', (e) => resolve({ found: true, path: cli, desktopApp, signedIn: false, error: e.message }))
     p.on('close', (code) => {
       try {
+        // `auth status` exits non-zero when signed out, but still prints its JSON.
         const j = JSON.parse(out) as { loggedIn?: boolean; authMethod?: string }
-        resolve({ found: true, path: cli, signedIn: code === 0 && !!j.loggedIn && j.authMethod !== 'none', method: j.authMethod })
+        resolve({ found: true, path: cli, desktopApp, signedIn: code === 0 && !!j.loggedIn && j.authMethod !== 'none', method: j.authMethod })
       } catch {
-        resolve({ found: true, path: cli, signedIn: false, error: out.slice(0, 200) })
+        resolve({ found: true, path: cli, desktopApp, signedIn: false, error: out.slice(0, 200) })
       }
     })
     setTimeout(() => p.kill(), 20_000)
@@ -135,7 +186,7 @@ export class ClaudeCodeAgent {
     this.deps.emit({ type: 'busy', busy: true })
     this.deps.emit({ type: 'items', items: this.items })
     try {
-      if (!cli) throw new Error('Claude Code was not found. Install it (claude.com/claude-code) and sign in with your Claude plan, or switch to an API key in Settings → AI.')
+      if (!cli) throw new Error('Claude Code was not found. Settings → AI shows how to install it (one command), or switch to an API key there.')
       await this.turn(cli, text)
     } catch (e) {
       const message = (e as Error).message
@@ -264,10 +315,11 @@ export class ClaudeCodeAgent {
     if (result?.is_error || (result && result.subtype !== 'success')) {
       const msg = result.result || result.subtype || 'Claude Code failed'
       if (existing && !sawSession) this.deps.store.setSetting('ai.ccSession', null) // the saved session is gone; start fresh next time
-      throw new Error(/log ?in|not logged|authenticat/i.test(msg) ? 'Claude Code is not signed in. Run `claude` once in a terminal and sign in with your Claude plan.' : msg)
+      throw new Error(/log ?in|not logged|authenticat/i.test(msg) ? NOT_SIGNED_IN : msg)
     }
     if (!result) {
       if (existing && /no conversation found|session/i.test(stderr)) this.deps.store.setSetting('ai.ccSession', null)
+      if (/not logged in|please run \/login|log ?in required/i.test(stderr)) throw new Error(NOT_SIGNED_IN)
       throw new Error(`Claude Code stopped (exit ${code}): ${stderr.trim().split('\n').slice(-3).join(' ') || 'no message'}`)
     }
   }

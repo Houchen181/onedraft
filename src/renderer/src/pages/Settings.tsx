@@ -96,14 +96,23 @@ const CC_FIELDS: FieldSpec[] = [
       { value: 'haiku', label: 'Haiku' }
     ]
   },
-  { key: 'ai.claudePath', label: 'claude.exe path (optional)', type: 'path', help: 'Leave empty to find it on PATH or in %USERPROFILE%\\.local\\bin.' }
+  {
+    key: 'ai.claudePath',
+    label: 'claude.exe path (optional)',
+    type: 'path',
+    help: 'Leave empty to find it on PATH, in %USERPROFILE%\\.local\\bin, or inside the Claude desktop app.'
+  }
 ]
 
 interface AiStatus {
   engine: 'claude-code' | 'api'
-  claude: { found: boolean; path?: string; signedIn: boolean; method?: string; error?: string }
+  engineSetting: string
+  claude: { found: boolean; path?: string; desktopApp?: boolean; signedIn: boolean; method?: string; error?: string }
   apiKeySet: boolean
 }
+
+/** The official Claude Code installer for Windows (claude.com/claude-code). */
+const INSTALL_CLAUDE = 'irm https://claude.ai/install.ps1 | iex'
 
 const API_FIELDS: FieldSpec[] = [
   { key: 'ai.apiKey', label: 'Claude API key', type: 'secret', help: 'From platform.claude.com → API keys. Stored encrypted on this computer.' },
@@ -159,30 +168,77 @@ const APP_FIELDS: FieldSpec[] = [
   { key: 'app.ffmpegPath', label: 'ffmpeg path (optional)', type: 'path', help: 'Leave empty to use the bundled ffmpeg.' }
 ]
 
-function EngineStatus({ ai }: { ai: AiStatus }) {
+function EngineStatus({ ai, waiting, onSignIn, onRecheck }: { ai: AiStatus; waiting: boolean; onSignIn: () => void; onRecheck: () => void }) {
+  const app = useApp()
   const c = ai.claude
+  const where = c.desktopApp ? ' (the copy that comes with the Claude desktop app)' : ''
+  const install = (
+    <div className="stack" style={{ gap: 6, marginTop: 6 }}>
+      <span>
+        Install Claude Code: open <b>PowerShell</b>, paste this and press Enter, then come back and press <i>Check again</i>.
+      </span>
+      <div className="row">
+        <code className="mono grow" style={{ background: 'var(--panel)', border: '1px solid var(--line)', borderRadius: 8, padding: '6px 9px' }}>
+          {INSTALL_CLAUDE}
+        </code>
+        <button
+          className="btn sm"
+          onClick={() => {
+            void navigator.clipboard.writeText(INSTALL_CLAUDE)
+            app.toast('Copied.')
+          }}
+        >
+          Copy
+        </button>
+        <button className="btn sm" onClick={onRecheck}>
+          Check again
+        </button>
+      </div>
+    </div>
+  )
+  const signIn = (
+    <div className="row wrap" style={{ marginTop: 8 }}>
+      <button className="btn primary sm" onClick={onSignIn} disabled={waiting}>
+        Sign in to Claude Code
+      </button>
+      <button className="btn sm" onClick={onRecheck}>
+        Check again
+      </button>
+      <span className="small muted">
+        {waiting ? 'Finish signing in in the window and browser that opened; this turns Ready by itself.' : 'Opens Claude Code’s own sign-in in your browser. Use the account with your Pro or Max plan.'}
+      </span>
+    </div>
+  )
   if (ai.engine === 'api')
     return (
       <div className="note">
         Using a Claude API key {ai.apiKeySet ? <span className="pill ok">key saved</span> : <span className="pill warn">no key yet</span>}. Each request is billed to
         your API account.
+        {ai.engineSetting === 'auto' && !ai.apiKeySet && (
+          <div style={{ marginTop: 6 }}>
+            Have a Claude Pro or Max plan? OneDraft can use it instead, through Claude Code{c.found ? ':' : '.'}
+            {c.found ? signIn : install}
+          </div>
+        )}
       </div>
     )
   return (
     <div className="note">
       {!c.found ? (
         <>
-          <span className="pill warn">Claude Code not found</span> Install Claude Code (claude.com/claude-code), run <code className="mono">claude</code> once and
-          sign in with your Claude plan.
+          <span className="pill warn">Claude Code not found</span> OneDraft runs the assistant on your Claude plan through Claude Code, which isn’t on this computer.
+          {install}
         </>
       ) : c.signedIn ? (
         <>
-          <span className="pill ok">Ready</span> Using your Claude plan through Claude Code ({c.method === 'claude.ai' ? 'signed in with claude.ai' : c.method}). Uses
-          your plan’s usage limits; no API key needed.
+          <span className="pill ok">Ready</span> Using your Claude plan through Claude Code{where} ({c.method === 'claude.ai' ? 'signed in with claude.ai' : c.method}).
+          Uses your plan’s usage limits; no API key needed.
         </>
       ) : (
         <>
-          <span className="pill warn">Not signed in</span> Run <code className="mono">claude</code> in a terminal and sign in with your Claude plan.
+          <span className="pill warn">Not signed in</span> Found Claude Code{where}, but it isn’t signed in yet. The Claude desktop app’s own sign-in doesn’t carry
+          over, so sign in once here.
+          {signIn}
         </>
       )}
       <div className="help" style={{ marginTop: 6 }}>
@@ -201,10 +257,36 @@ export function Settings() {
   const [saving, setSaving] = useState(false)
 
   const [ai, setAi] = useState<AiStatus>()
+  const [waitingSignIn, setWaitingSignIn] = useState(false)
+  const recheck = () => call<AiStatus>('ai.status').then((s) => (setAi(s), s))
   useEffect(() => {
     void call<McpInfo>('mcp.info').then(setMcp)
-    void call<AiStatus>('ai.status').then(setAi)
+    void recheck()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings])
+  // After "Sign in", look every few seconds until Claude Code says it's signed in (up to 5 minutes).
+  useEffect(() => {
+    if (!waitingSignIn) return
+    const started = Date.now()
+    const t = setInterval(() => {
+      void recheck().then((s) => {
+        if (s.claude.signedIn || Date.now() - started > 5 * 60_000) {
+          setWaitingSignIn(false)
+          if (s.claude.signedIn) app.toast('Claude Code is signed in. The assistant now runs on your Claude plan.')
+        }
+      })
+    }, 3000)
+    return () => clearInterval(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [waitingSignIn])
+  const signIn = async () => {
+    try {
+      await call('ai.signIn')
+      setWaitingSignIn(true)
+    } catch (e) {
+      app.toast((e as Error).message, true)
+    }
+  }
 
   const value = (k: string) => (k in edits ? edits[k] : settings?.values[k])
   const set = (k: string, v: unknown) => setEdits((s) => ({ ...s, [k]: v }))
@@ -396,7 +478,7 @@ export function Settings() {
         <h2>AI assistant</h2>
         <div className="stack">
           <Field spec={ENGINE_FIELD} value={value('ai.engine')} onChange={(v) => set('ai.engine', v)} />
-          {ai && <EngineStatus ai={ai} />}
+          {ai && <EngineStatus ai={ai} waiting={waitingSignIn} onSignIn={() => void signIn()} onRecheck={() => void recheck()} />}
           {(() => {
             const chosen = String(value('ai.engine') ?? 'auto')
             const engine = chosen === 'auto' ? ai?.engine : chosen

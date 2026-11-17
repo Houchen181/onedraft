@@ -129,6 +129,10 @@ Settings → AI → *Run the assistant on*:
   through a private local MCP server. It uses your plan's usage limits and needs no API key. OneDraft never reads
   or stores your Claude login, and removes any API key from Claude Code's environment so your plan is used.
   Your personal hooks, plugins and skills are not loaded into these runs.
+  OneDraft finds `claude` on PATH, in `%USERPROFILE%\.local\bin` (the standard install:
+  `irm https://claude.ai/install.ps1 | iex` in PowerShell), or the copy inside the Claude desktop app. That copy
+  isn't signed in on its own (the app keeps its sign-in to itself), so press **Sign in to Claude Code** in
+  Settings → AI once: it opens Claude Code's own sign-in in your browser.
   *For your own use:* Anthropic does not allow apps to offer Claude plan sign-in to other people, so a build
   for other users should use API keys (or have them connect their own Claude app over MCP, below).
 - **A Claude API key**, billed per use (Messages API, Claude Opus 5.5 by default).

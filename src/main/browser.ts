@@ -60,6 +60,9 @@ const SIGN_IN_SWITCHES = [
   // DevTools over a pipe only OneDraft holds: a debugging port would let any program on this computer read the
   // new sign-in's cookies while the window is open.
   '--remote-debugging-pipe',
+  // With that pipe, Chromium tells every page the browser is automated (navigator.webdriver), and Google refuses to
+  // sign in ("This browser or app may not be secure"). OneDraft only reads cookies: the sites see plain Edge.
+  '--disable-blink-features=AutomationControlled',
   '--no-first-run',
   '--no-default-browser-check',
   // A fresh Edge profile otherwise signs in to the Windows (work or school) Microsoft account and syncs with it.

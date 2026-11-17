@@ -135,6 +135,9 @@ website** (`src/connectors/web.ts`), the default; the official APIs stay as the 
     last `--disable-features`, so OneDraft repeats Playwright's list (1.65) and adds `msImplicitSignin`.
   - `--remote-debugging-port` lets any local program (other Windows users included) read a profile's cookies while
     the window is open; `--remote-debugging-pipe` (fds 3/4, NUL-terminated JSON) keeps DevTools to OneDraft.
+  - **Found in 0.1.3**: Chromium sets `navigator.webdriver` for `--remote-debugging-pipe` (as for `--enable-automation`
+    and `--headless`), and Google's sign-in then refuses the window ("Couldn't sign you in: this browser or app may
+    not be secure"). `--disable-blink-features=AutomationControlled` turns it off; measured on Edge 157, headed.
   - A natively scheduled target keeps status `scheduled` after its time: "still to go out" needs `scheduled_at > now`.
   - bsdtar killed mid-unpack leaves a truncated exe: unpack beside the target and move it into place when complete.
   - PowerShell's `-WorkingDirectory` takes wildcards (`[`/`]` need escaping); `Start-Process` with a `.cmd` lets cmd.exe

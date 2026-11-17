@@ -4,6 +4,8 @@
 // headless, and serve small local pages in place of the sites (nothing reaches them); without Edge they're skipped.
 
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { chromium, type BrowserContext, type Route } from 'playwright-core'
@@ -201,6 +203,51 @@ describe.skipIf(!EDGE)('the sign-in window, in Edge', () => {
     ac.abort()
     await expect(signing).rejects.toThrow('Sign-in canceled.')
     expect(Date.now() - t0).toBeLessThan(8000)
+  }, 60_000)
+})
+
+// Google refuses to sign in a browser that says it's automated ("This browser or app may not be secure"), and
+// Chromium says so (navigator.webdriver) whenever DevTools runs over a pipe, as it does for both of OneDraft's windows.
+describe.skipIf(!EDGE)('what the sites see, in Edge', () => {
+  it('the sign-in window looks like plain Edge: navigator.webdriver is false', async () => {
+    const seen: string[] = []
+    const server = createServer((req, res) => {
+      if (req.url?.startsWith('/report')) {
+        seen.push(new URL(req.url, 'http://local').searchParams.get('webdriver') ?? '')
+        res.end()
+        return
+      }
+      res.setHeader('content-type', 'text/html')
+      res.end("<script>fetch('/report?webdriver=' + navigator.webdriver)</script>")
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()))
+    try {
+      const m = new BrowserManager(tempDir(), () => 'msedge')
+      const ac = new AbortController()
+      const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`
+      const signing = m.signIn('webdriver', url, () => false, ac.signal, ['--headless=new'])
+      signing.catch(() => undefined)
+      for (let i = 0; i < 150 && !seen.length; i++) await new Promise((r) => setTimeout(r, 100))
+      ac.abort()
+      await expect(signing).rejects.toThrow('Sign-in canceled.')
+      expect(seen[0]).toBe('false')
+    } finally {
+      server.close()
+    }
+  }, 60_000)
+
+  it('so do the posting windows', async () => {
+    process.env['ONEDRAFT_BROWSER_ARGS'] = '--headless=new'
+    const m = new BrowserManager(tempDir(), () => 'msedge')
+    try {
+      const window = await m.lease('webdriver-post', { headless: true })
+      const page = await window.newPage()
+      expect(await page.evaluate('navigator.webdriver')).toBe(false)
+      await window.close()
+    } finally {
+      delete process.env['ONEDRAFT_BROWSER_ARGS']
+      await m.closeAll()
+    }
   }, 60_000)
 })
 

@@ -150,6 +150,8 @@ describe('captions from speech', () => {
   })
 })
 
+// Each test below runs ffmpeg several times: about half a second on a desktop, but more than Vitest's default 5 s on
+// a fresh CI machine, which once failed the build. Each gets 60 s.
 describe('rendering with cuts', () => {
   /** A flash on screen and a beep in the sound at 0.5 s past every second, for 10 s. */
   function syncSource(): string {
@@ -200,7 +202,7 @@ describe('rendering with cuts', () => {
     expect(f.map((x) => Math.round(x * 10) / 10)).toEqual([0.5, 1.9, 2.5, 3.5, 4.5, 5.9, 6.9, 7.9])
     expect(b).toHaveLength(f.length)
     for (let i = 0; i < f.length; i++) expect(Math.abs(f[i] - b[i])).toBeLessThan(0.045)
-  })
+  }, 60_000)
 
   it('burns in captions from speech with libass', async () => {
     const src = syncSource()
@@ -214,7 +216,7 @@ describe('rendering with cuts', () => {
     const r = await renderEdit(tools, spec, out, join(dir, 'work-captions'), undefined, undefined, { transcriptOf: async () => transcript })
     expect(r.durationSec).toBeCloseTo(9.45, 1)
     await expect(renderEdit(tools, spec, join(dir, 'x.mp4'), join(dir, 'work-x'))).rejects.toThrow(/speech-to-text/)
-  })
+  }, 60_000)
 })
 
 describe('setting up Whisper', () => {

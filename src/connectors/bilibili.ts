@@ -337,7 +337,7 @@ export const bilibili: Connector = {
         field: 'aiGenerated',
         message:
           account && isWeb(account)
-            ? 'Turn on the AI-content declaration on Bilibili’s upload page before you press 立即投稿 (required for AI content).'
+            ? 'On Bilibili’s upload page, choose the creation statement (创作声明) for AI-generated content before you press 立即投稿 (required for AI content).'
             : 'After it uploads, turn on the AI-content declaration in Bilibili’s creator centre (required for AI content; biliup cannot set it).'
       })
     if (content.options.copyright === '2' && !String(content.options.source ?? '').trim())

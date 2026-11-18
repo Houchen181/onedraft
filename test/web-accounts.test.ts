@@ -315,13 +315,14 @@ describe.skipIf(!EDGE)('posting on a website page, in Edge', () => {
   }, 60_000)
 
   it('fills in Bilibili’s upload page: its own title and suggested tags give way to the post’s', async () => {
-    // Like the creator centre's uploader (seen 2026-11-17, in English): the upload area's own hidden file box starts
-    // nothing; a click on the area opens BUploader's box, whose file shows the form, with the file name as the title
-    // and tags Bilibili suggests; the tag box adds a tag on Enter.
+    // Like the creator centre's uploader (seen 2026-11-17 on the user's account, in English): a click on the upload
+    // area opens the upload component's hidden file box; a file chosen while the page is still starting up is dropped
+    // by the page's own script error, and chosen again it starts the upload. The form then shows, with the file name
+    // as the title and tags Bilibili suggests; the tag box adds a tag on Enter. BUploader's own box starts nothing.
     const page = `
       <div class="bcc-upload-wrapper">
         <div class="upload-area" style="width:300px;height:120px">Click to upload or drag and drop the video into this area</div>
-        <input accept=".mp4,.flv,.mov" multiple type="file" style="display:none">
+        <input accept=".mp4,.flv,.mov" multiple type="file" style="display:none" id="pick">
       </div>
       <div id="form" hidden>
         <input type="text" class="input-val" maxlength="80" id="title">
@@ -338,9 +339,17 @@ describe.skipIf(!EDGE)('posting on a website page, in Edge', () => {
         <input type="file" name="buploader" multiple accept=".mp4,.flv,.mov">
       </div>
       <script>
-        const file = document.querySelector('input[name=buploader]')
-        document.querySelector('.upload-area').addEventListener('click', () => file.click())
+        const file = document.getElementById('pick')
+        window.chosen = 0
+        window.uploads = 0
+        document.querySelector('.bcc-upload-wrapper').addEventListener('click', () => {
+          file.value = null
+          file.click()
+        })
         file.addEventListener('change', () => {
+          if (++window.chosen === 1) throw new TypeError("Cannot read properties of undefined (reading 'catch')")
+          window.uploads++
+          document.querySelector('.bcc-upload-wrapper').remove()
           document.getElementById('form').hidden = false
           document.getElementById('title').value = file.files[0].name
         })
@@ -370,10 +379,14 @@ describe.skipIf(!EDGE)('posting on a website page, in Edge', () => {
     try {
       const r = await webPublish('bilibili', ctxFor(browser), bili, { targetId: 't', content: post })
       expect(r.state).toBe('handoff')
-      expect(r.note).toMatch(/^Check the details and the category \(分区 \/ Category\), and press 立即投稿 \(Submit\) once the upload says 上传完成 \(Upload complete\)\./)
+      expect(r.note).toMatch(
+        /^Choose a creation statement \(创作声明 \/ Creation Statement\), check the details and the category \(分区 \/ Category\), and press 立即投稿 \(Submit\) once the upload says 上传完成 \(Upload complete\)\./
+      )
       expect(r.note).toContain('Choose 转载 (Repost) and give the source: https://example.com/v.')
-      expect(r.note).toContain('AI-content declaration')
+      expect(r.note).toContain('the one for AI-generated content')
       const tab = browser.pages().find((p) => p.url().startsWith('https://member.bilibili.com/'))!
+      // Dropped once, chosen again, and uploaded once.
+      expect(await tab.evaluate('[window.chosen, window.uploads]')).toEqual([2, 1])
       expect(await tab.locator('#title').inputValue()).toBe('My video')
       expect(await tab.locator('.tag-pre-wrp .label-item-v2-container').allInnerTexts()).toEqual(['first', 'second'])
       expect((await tab.locator('#desc').innerText()).trim()).toBe('About it')

@@ -76,10 +76,10 @@ export const WEB_SELECTORS: Record<WebPlatform, Record<string, string[]>> = {
     attachments: ["[role='dialog'] [data-testid='attachments']", "[data-testid='attachments']"]
   },
   bilibili: {
-    /** The "Upload Video" area: a click on it opens the uploader's file box. */
+    /** The "Upload Video" area: a click on it opens the page's file box. */
     uploadArea: ['.bcc-upload-wrapper .upload-area', 'div.upload-area'],
-    /** The uploader's own (BUploader's) hidden file box first: the upload area's own box starts nothing any more. */
-    fileInput: ["input[name='buploader'][accept*='mp4']", "input[type='file'][accept*='mp4']", "input[type='file'][accept*='video']"],
+    /** The file box that click opens (the upload component's own, hidden), then any video box. */
+    fileInput: [".bcc-upload-wrapper input[type='file']", "input[type='file'][accept*='mp4']", "input[type='file'][accept*='video']"],
     /** Appears once the upload starts, holding the file name. */
     title: ["input[maxlength='80'][type='text']", "input.input-val[type='text'][maxlength='80']", "input[placeholder*='标题']"],
     /** The close buttons of the tags Bilibili suggests by itself. */
@@ -534,7 +534,7 @@ const AI_NOTE: Record<WebPlatform, string> = {
   tiktok: 'This video is marked as made with AI: under Show more, turn on “AI-generated content”.',
   instagram: 'This post is marked as made with AI: if Instagram offers “Add AI label” (under Advanced settings), turn it on.',
   x: 'This post is marked as made with AI; X’s website has no label for that, so say so in the text if you need to.',
-  bilibili: 'This video is marked as made with AI: turn on Bilibili’s AI-content declaration on the page before you press 立即投稿.'
+  bilibili: 'This video is marked as made with AI: under Creation Statement (创作声明), choose the one for AI-generated content.'
 }
 
 const KEPT = 'the page didn’t keep what OneDraft typed'
@@ -660,24 +660,46 @@ const FILL: Record<WebPlatform, Fill> = {
 
   async bilibili(f, content, publishAt) {
     const video = content.media.find(isVideo)!
-    // Bilibili's uploader (BUploader) keeps a hidden file box of its own, which a click on the upload area opens; a
-    // file put in the upload area's own hidden box starts nothing (seen 2026-11-17). So OneDraft clicks the area and
-    // answers the file box that opens, as a person would; the uploader's box is the fallback.
-    let attached = false
-    const area = await f.maybe('uploadArea', 45_000)
-    if (area) {
-      f.check()
-      const chooser = f.page.waitForEvent('filechooser', { timeout: 10_000 }).catch(() => undefined)
-      await area.click({ timeout: 10_000 }).catch(() => undefined)
-      const box = await chooser
-      if (box) attached = await bounded(box.setFiles(video), 30_000).then(() => true, () => false)
+    // Bilibili's page drops a file chosen while it is still starting up: its own script fails ("reading 'catch'") and
+    // no upload starts. Seen 2026-11-17 on the user's account: a file chosen as the upload area appeared started
+    // nothing; the same file chosen 20 s later started at once. So OneDraft lets the page settle, chooses the way a
+    // person does (a click on the area, then the file box it opens), and chooses again while no upload has started.
+    const errors: string[] = []
+    const onError = (e: Error) => void (errors.length < 3 && errors.push(short(e)))
+    f.page.on('pageerror', onError)
+    let titleBox: Locator | undefined
+    try {
+      const area = await f.find('uploadArea', 45_000)
+      await f.wait(3000)
+      for (let attempt = 1; attempt <= 3 && !titleBox; attempt++) {
+        if (attempt > 1) {
+          // An upload that did start has replaced the upload area: wait for its form, never add the video twice.
+          if (!(await f.maybe('uploadArea', 1000))) {
+            titleBox = await f.maybe('title', 60_000)
+            break
+          }
+          f.ctx.log(`Bilibili didn’t take the video${errors.length ? ` (its page said: ${errors[errors.length - 1]})` : ''}; choosing it again.`, 'warn')
+          await f.wait(3000)
+        }
+        f.check()
+        const chooser = f.page.waitForEvent('filechooser', { timeout: 10_000 }).catch(() => undefined)
+        await area.click({ timeout: 10_000 }).catch(() => undefined)
+        const box = await chooser
+        const chosen = box ? await bounded(box.setFiles(video), 30_000).then(() => true, () => false) : false
+        if (!chosen) await (await f.find('fileInput', 10_000, true)).setInputFiles(video)
+        if (attempt === 1) f.ctx.progress(0.3, 'Uploading to Bilibili')
+        // The form appears as soon as an upload starts, its title set to the file name.
+        titleBox = await f.maybe('title', 12_000)
+      }
+    } finally {
+      f.page.off('pageerror', onError)
     }
-    if (!attached) await (await f.find('fileInput', 15_000, true)).setInputFiles(video)
-    f.ctx.progress(0.3, 'Uploading to Bilibili')
-    // The form appears once the upload starts, its title set to the file name: replaced. Filling in doesn't wait for
-    // the upload (a big video takes longer than OneDraft gives a page); the person presses 立即投稿 once it's done.
-    const titleBox = await f.maybe('title', 120_000)
-    if (!titleBox) throw new NotFound(`Bilibili didn’t start the upload; press Upload Video (上传视频) and choose ${basename(video)}`)
+    if (!titleBox)
+      throw new NotFound(
+        `Bilibili didn’t start the upload${errors.length ? ` (its page said: ${errors[0]})` : ''}; press Upload Video (上传视频) and choose ${basename(video)}`
+      )
+    // The file-name title is replaced. Filling in doesn't wait for the upload (a big video takes longer than OneDraft
+    // gives a page); the person presses 立即投稿 once it's done.
     if (!(await f.setValue(titleBox, cut(content.title, 80)))) f.notes.push(`Check the title: ${KEPT}.`)
     const description = cut(content.caption, 2000)
     const desc = await f.maybe('description', 8000)
@@ -714,11 +736,13 @@ const FILL: Record<WebPlatform, Fill> = {
     if (o.dynamic) f.notes.push(`Add the feed text (粉丝动态): ${String(o.dynamic)}`)
     if (content.cover) f.notes.push(`To use your cover, set it under 封面: ${content.cover}`)
     if (content.aiGenerated) f.notes.push(AI_NOTE.bilibili)
-    // Bilibili shows its page in Chinese or English: both names are given.
+    // Bilibili shows its page in Chinese or English: both names are given. The creation statement is required, and
+    // what fits is the person's call (seen on the live page 2026-11-17).
     const go = 'press 立即投稿 (Submit) once the upload says 上传完成 (Upload complete)'
+    const check = 'Choose a creation statement (创作声明 / Creation Statement), check the details and the category (分区 / Category)'
     return publishAt
-      ? `Check the details and the category (分区 / Category). To post it at ${when(publishAt)}, turn on 定时发布 (Scheduled), set that time, and ${go}.`
-      : `Check the details and the category (分区 / Category), and ${go}.`
+      ? `${check}. To post it at ${when(publishAt)}, turn on 定时发布 (Scheduled), set that time, and ${go}.`
+      : `${check}, and ${go}.`
   }
 }
 

@@ -168,6 +168,15 @@ website** (`src/connectors/web.ts`), the default; the official APIs stay as the 
     - Bilibili posts said "signed out" three times within minutes of connecting, then worked without a new sign-in.
       Unexplained. Bilibili no longer counts a password box as signed out (its redirect does), and every post that
       decides "signed out" now saves a screenshot.
+  - **Found in 0.1.6**, tested on the user's account with their permission (a 1-second clip, nothing submitted):
+    Bilibili's upload page drops a file chosen while it is still starting up. Chosen as the upload area appeared
+    (0.1 s after the page fetched the account's data, `archive/pre`), the page's own script failed (`TypeError:
+    Cannot read properties of undefined (reading 'catch')`) and no upload started. The same file chosen 20 s later
+    started at once. The click opens the upload component's own hidden box (`bcc-upload`'s `openFileDialogOnClick`),
+    not BUploader's. OneDraft now waits 3 s, chooses, and chooses again while the upload area is still there. With
+    that, OneDraft's code filled in the real (English) page in 11 s: title, tags and description. The page also
+    requires a **Creation Statement** (创作声明), which OneDraft leaves to the person. The account check reported the
+    account real-name verified, not banned (uploads are blocked when `myinfo.banned` or `identify_check.code` is set).
   - A natively scheduled target keeps status `scheduled` after its time: "still to go out" needs `scheduled_at > now`.
   - bsdtar killed mid-unpack leaves a truncated exe: unpack beside the target and move it into place when complete.
   - PowerShell's `-WorkingDirectory` takes wildcards (`[`/`]` need escaping); `Start-Process` with a `.cmd` lets cmd.exe

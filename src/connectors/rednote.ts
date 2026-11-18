@@ -54,6 +54,8 @@ async function find(page: Page, ctx: ConnectorContext, key: SelectorKey, timeout
   const list = selectors(ctx, key)
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
+    // Rednote sends a signed-out visitor to its sign-in page, sometimes seconds after the page opened.
+    if (page.url().startsWith(`${CREATOR}/login`)) throw new NeedsLoginError('Rednote signed this account out; reconnect it.')
     for (const s of list) {
       const loc = page.locator(s).first()
       if ((await loc.count()) > 0 && (!visible || (await loc.isVisible().catch(() => false)))) return loc
@@ -74,7 +76,8 @@ async function snapshot(page: Page | undefined, ctx: ConnectorContext, label: st
     mkdirSync(dir, { recursive: true })
     const stem = join(dir, `rednote-${label}-${Date.now()}`)
     await page.screenshot({ path: `${stem}.png`, fullPage: true })
-    writeFileSync(`${stem}.html`, await page.content())
+    // The page's scripts can carry session tokens: the HTML keeps the markup only.
+    writeFileSync(`${stem}.html`, (await page.content()).replace(/<script\b[\s\S]*?<\/script>/gi, ''))
     return `${stem}.png`
   } catch {
     return undefined
@@ -91,13 +94,18 @@ function within<T>(p: Promise<T>, ms: number): Promise<T> {
 }
 
 /**
- * Cookies Rednote's creator site sets once someone signs in (a visitor gets only a1, webId, gid, xsecappid and the
- * like). The names are the ones community tools' cookie exports show; any one of them counts.
+ * The creator site's own sign-in cookies (names from community tools' cookie exports). Scanning the code first signs in
+ * to Rednote's shared login (customer-sso-sid, x-user-id-open…), and the creator site takes over from that: until it
+ * has, its pages still say signed out (seen 2026-11-17 on a profile closed after the shared login alone).
  */
-const SESSION_COOKIES = ['galaxy_creator_session_id', 'access-token-creator.xiaohongshu.com', 'customer-sso-sid']
+const SESSION_COOKIES = ['galaxy_creator_session_id', 'access-token-creator.xiaohongshu.com', 'galaxy.creator.beaker.session.id']
+/** Rednote's shared login, before the creator site takes over. */
+const SHARED_LOGIN = 'customer-sso-sid'
+
+const onRednote = (c: { domain: string }) => /^(.+\.)?xiaohongshu\.com$/.test(c.domain.replace(/^\./, '').toLowerCase())
 
 export const rednoteSession = (cookies: { name: string; value: string; domain: string }[]) =>
-  cookies.some((c) => SESSION_COOKIES.includes(c.name) && !!c.value && /^(.+\.)?xiaohongshu\.com$/.test(c.domain.replace(/^\./, '').toLowerCase()))
+  cookies.some((c) => SESSION_COOKIES.includes(c.name) && !!c.value && onRednote(c))
 
 /**
  * Signed in? Rednote's creator pages send anyone who isn't to /login (?redirectReason=401). A sign-in cookie settles
@@ -244,15 +252,28 @@ export const rednote: Connector = {
       let cookies: Cookies = []
       const deadline = Date.now() + 5 * 60_000
       let signedIn = false
+      /** When the shared login went through: if the creator site doesn't take over, the person hears why it waits. */
+      let sharedAt = 0
       while (!signedIn && open() && Date.now() < deadline) {
         if (ctx.signal?.aborted) throw canceled()
         await new Promise((r) => setTimeout(r, 2000))
         if (ctx.signal?.aborted) throw canceled()
         cookies = (await within(win.cookies(), 5000).catch(() => undefined)) ?? cookies
-        // Rednote's sign-in cookies, whichever tab the sign-in ends in; or, should Rednote rename them, a creator
-        // page past the sign-in (an error page or another site doesn't count).
+        // The creator site's sign-in cookies, whichever tab the sign-in ends in; or, should Rednote rename them, a
+        // creator page past the sign-in (an error page or another site doesn't count).
         signedIn = rednoteSession(cookies) || (await pastSignIn(win, ctx))
+        if (!signedIn && !sharedAt && cookies.some((c) => c.name === SHARED_LOGIN && !!c.value && onRednote(c))) sharedAt = Date.now()
+        if (!signedIn && sharedAt > 0 && Date.now() - sharedAt > 15_000) {
+          sharedAt = -1
+          ctx.connectStatus?.('Rednote confirmed your scan, but its creator site hasn’t finished signing you in yet. If the window shows a step to finish, do it there.')
+          const shot = await snapshot(win.pages().find((p) => !p.isClosed()), ctx, 'signin-waiting')
+          ctx.log(`Rednote’s shared login went through, but its creator site hasn’t signed in yet${shot ? ` (screenshot: ${shot})` : ''}.`, 'warn')
+        }
       }
+      // Let the creator site land on its own page before the window closes (it may still be setting things up).
+      if (signedIn)
+        for (let i = 0; i < 8 && open() && !win.pages().some((p) => !p.isClosed() && p.url().startsWith(`${CREATOR}/`) && !p.url().includes('/login')); i++)
+          await new Promise((r) => setTimeout(r, 1000))
       if (ctx.signal?.aborted) throw canceled()
       if (!signedIn && !open()) {
         // The person closed the window: signed in by then? The profile keeps what the window had.

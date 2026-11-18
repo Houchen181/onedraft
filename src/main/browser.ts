@@ -52,6 +52,26 @@ const pause = (ms: number, signal?: AbortSignal) =>
     signal?.addEventListener('abort', done, { once: true })
   })
 
+/** Is a tab still on the page the sign-in started on (same host and path)? */
+async function onSignInPage(cdp: Cdp, start: string): Promise<boolean> {
+  let from: URL
+  try {
+    from = new URL(start)
+  } catch {
+    return false
+  }
+  const r = await cdp.send<{ targetInfos: { type: string; url: string }[] }>('Target.getTargets', {}, 5000).catch(() => undefined)
+  return !!r?.targetInfos.some((t) => {
+    if (t.type !== 'page') return false
+    try {
+      const u = new URL(t.url)
+      return u.host === from.host && u.pathname === from.pathname
+    } catch {
+      return false
+    }
+  })
+}
+
 /** Extra switches for every browser OneDraft starts, from ONEDRAFT_BROWSER_ARGS (tests pass --headless=new). */
 const extraSwitches = (): string[] => (process.env['ONEDRAFT_BROWSER_ARGS'] ?? '').split(/\s+/).filter(Boolean)
 
@@ -473,10 +493,19 @@ export class BrowserManager {
         const { cookies } = await unlessAborted(cdp.send<{ cookies: WebCookie[] }>('Storage.getCookies'), signal, canceled)
         const list = cookies.map((c) => ({ name: c.name, value: c.value, domain: c.domain }))
         if (signedIn(list)) {
+          // Signed in, but sites carry on from there (Bilibili's sign-in page sets SESSDATA, then goes on to
+          // bilibili.com): a few seconds to leave the sign-in page before the window closes, keeping what they add.
+          for (let i = 0; i < 8 && !signal?.aborted && (await onSignInPage(cdp, url)); i++) await pause(1000, signal)
+          await pause(1500, signal)
+          if (signal?.aborted) throw canceled()
+          const after = await cdp
+            .send<{ cookies: WebCookie[] }>('Storage.getCookies', {}, 5000)
+            .then((r) => r.cookies.map((c) => ({ name: c.name, value: c.value, domain: c.domain })))
+            .catch(() => list)
           // The browser saves the cookies as it shuts down: give it time before forcing it.
           graceMs = 20_000
           await cdp.send('Browser.close').catch(() => undefined)
-          return list
+          return signedIn(after) ? after : list
         }
         // Closing the last window may leave the browser running in the background: that still means "closed".
         const { targetInfos } = await unlessAborted(cdp.send<{ targetInfos: { type: string }[] }>('Target.getTargets'), signal, canceled)

@@ -154,6 +154,20 @@ website** (`src/connectors/web.ts`), the default; the official APIs stay as the 
     cookie exports show; a visitor gets only `a1`, `webId`, `gid`, `xsecappid` and the like) in any tab. A creator
     page past the sign-in, in any tab, still counts too. A closed window's profile is read again before giving up.
     Signed out, creator pages redirect to /login?redirectReason=401 (checked).
+  - **Found in 0.1.5**, from the first real post to all six accounts (YouTube, TikTok, Instagram and X filled in and
+    handed over):
+    - Bilibili's upload page now runs its own uploader, BUploader. It keeps a hidden `input[name=buploader]` that a
+      click on the upload area opens; a file put in the upload area's own hidden box (MultiPost's selector) starts
+      nothing. OneDraft now clicks the area and answers the file box that opens. The page shows in English for an
+      English browser ("Creator Hub"), so the tag box is found inside `.tag-input-wrp`.
+    - Rednote: a scan first signs in to Rednote's shared login (`customer-sso-sid`, `x-user-id-open…`,
+      `customerClientId`); the creator site's own cookies come after. 0.1.5 counted the shared login and closed the
+      window too early, so posting found the account signed out. Only the creator site's cookies count now.
+    - Sign-in windows now give the site a few seconds to leave its sign-in page before closing (Bilibili's sets
+      `SESSDATA`, then goes on to bilibili.com).
+    - Bilibili posts said "signed out" three times within minutes of connecting, then worked without a new sign-in.
+      Unexplained. Bilibili no longer counts a password box as signed out (its redirect does), and every post that
+      decides "signed out" now saves a screenshot.
   - A natively scheduled target keeps status `scheduled` after its time: "still to go out" needs `scheduled_at > now`.
   - bsdtar killed mid-unpack leaves a truncated exe: unpack beside the target and move it into place when complete.
   - PowerShell's `-WorkingDirectory` takes wildcards (`[`/`]` need escaping); `Start-Process` with a `.cmd` lets cmd.exe

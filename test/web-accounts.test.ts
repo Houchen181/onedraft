@@ -196,6 +196,27 @@ describe.skipIf(!EDGE)('the sign-in window, in Edge', () => {
     expect(Date.now() - t0).toBeLessThan(8000)
   }, 60_000)
 
+  it('lets the site finish after the sign-in before closing, and keeps what it adds', async () => {
+    // Like Bilibili's: the sign-in page sets its cookie, then a moment later goes on to the site, which adds more.
+    const server = createServer((req, res) => {
+      res.setHeader('content-type', 'text/html')
+      res.end(
+        req.url?.startsWith('/home')
+          ? "<script>document.cookie = 'landed=1; path=/'</script>"
+          : "<script>setTimeout(() => (document.cookie = 'sid=1; path=/'), 300); setTimeout(() => (location.href = '/home'), 3500)</script>"
+      )
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()))
+    try {
+      const m = new BrowserManager(tempDir(), () => 'msedge')
+      const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/login`
+      const cookies = await m.signIn('settle', url, (c) => c.some((x) => x.name === 'sid'), undefined, ['--headless=new'])
+      expect(cookies.map((c) => c.name).sort()).toEqual(['landed', 'sid'])
+    } finally {
+      server.close()
+    }
+  }, 60_000)
+
   it('stops on Cancel, and keeps OneDraft’s own browser off a profile while its sign-in window is open', async () => {
     const m = new BrowserManager(tempDir(), () => 'msedge')
     const ac = new AbortController()
@@ -294,21 +315,31 @@ describe.skipIf(!EDGE)('posting on a website page, in Edge', () => {
   }, 60_000)
 
   it('fills in Bilibili’s upload page: its own title and suggested tags give way to the post’s', async () => {
-    // Like the creator centre's uploader: the form shows once a file is chosen, with the file name as the title and
-    // tags Bilibili suggests; the tag box adds a tag on Enter.
+    // Like the creator centre's uploader (seen 2026-11-17, in English): the upload area's own hidden file box starts
+    // nothing; a click on the area opens BUploader's box, whose file shows the form, with the file name as the title
+    // and tags Bilibili suggests; the tag box adds a tag on Enter.
     const page = `
-      <input type="file" accept=".mp4,.flv,.mov" style="display:none">
+      <div class="bcc-upload-wrapper">
+        <div class="upload-area" style="width:300px;height:120px">Click to upload or drag and drop the video into this area</div>
+        <input accept=".mp4,.flv,.mov" multiple type="file" style="display:none">
+      </div>
       <div id="form" hidden>
         <input type="text" class="input-val" maxlength="80" id="title">
-        <div class="tag-pre-wrp">
-          <div class="label-item-v2-container">生活<span class="label-item-v2-close">×</span></div>
-          <div class="label-item-v2-container">日常<span class="label-item-v2-close">×</span></div>
+        <div class="tag-input-wrp">
+          <div class="tag-pre-wrp">
+            <div class="label-item-v2-container">生活<span class="label-item-v2-close">×</span></div>
+            <div class="label-item-v2-container">日常<span class="label-item-v2-close">×</span></div>
+          </div>
+          <input placeholder="Press Enter to create tags" id="tag">
         </div>
-        <input placeholder="按回车键Enter创建标签" id="tag">
         <div class="ql-editor" contenteditable="true" id="desc"><p><br></p></div>
       </div>
+      <div style="position:absolute;top:0;left:0;height:1px;width:1px;overflow:hidden;opacity:0">
+        <input type="file" name="buploader" multiple accept=".mp4,.flv,.mov">
+      </div>
       <script>
-        const file = document.querySelector('input[type=file]')
+        const file = document.querySelector('input[name=buploader]')
+        document.querySelector('.upload-area').addEventListener('click', () => file.click())
         file.addEventListener('change', () => {
           document.getElementById('form').hidden = false
           document.getElementById('title').value = file.files[0].name
@@ -339,7 +370,7 @@ describe.skipIf(!EDGE)('posting on a website page, in Edge', () => {
     try {
       const r = await webPublish('bilibili', ctxFor(browser), bili, { targetId: 't', content: post })
       expect(r.state).toBe('handoff')
-      expect(r.note).toMatch(/^Check the details and the category \(分区\), and press 立即投稿 \(Submit\) once the upload says 上传完成\./)
+      expect(r.note).toMatch(/^Check the details and the category \(分区 \/ Category\), and press 立即投稿 \(Submit\) once the upload says 上传完成 \(Upload complete\)\./)
       expect(r.note).toContain('Choose 转载 (Repost) and give the source: https://example.com/v.')
       expect(r.note).toContain('AI-content declaration')
       const tab = browser.pages().find((p) => p.url().startsWith('https://member.bilibili.com/'))!
@@ -388,6 +419,9 @@ describe('Rednote’s sign-in cookies', () => {
     expect(rednoteSession([c('access-token-creator.xiaohongshu.com', 't', 'creator.xiaohongshu.com')])).toBe(true)
     expect(rednoteSession([c('galaxy_creator_session_id', 's', '.notxiaohongshu.com')])).toBe(false)
     expect(rednoteSession([c('galaxy_creator_session_id', '', '.xiaohongshu.com')])).toBe(false)
+    // The shared login a scan sets first (what a 0.1.5 profile closed too early had): the creator site hasn't taken over.
+    const shared = ['customer-sso-sid', 'x-user-id-open.xiaohongshu.com', 'customerClientId'].map((n) => c(n, 'v', '.xiaohongshu.com'))
+    expect(rednoteSession([...visitor, ...shared])).toBe(false)
   })
 })
 
@@ -397,17 +431,18 @@ describe.skipIf(!EDGE)('Rednote sign-in, in Edge', () => {
   const HOME = '<div class="home">创作服务平台</div>'
 
   /** OneDraft's browser for these tests: each launch is a headless Edge on the account's profile, Rednote served here. */
-  function rednoteCtx() {
+  function rednoteCtx(more: Record<string, string> = {}) {
     const root = tempDir()
     const opened: BrowserContext[] = []
     const forgotten: string[] = []
+    const pages: Record<string, string> = { '/login': LOGIN, '/new/home': HOME, ...more }
     const ctx = fakeCtx({
       browser: async (key: string) => {
         const b = await chromium.launchPersistentContext(join(root, key), { channel: 'msedge', headless: true })
         await b.route('**/*', (route: Route) => {
           const url = route.request().url()
-          const body = url.startsWith('https://creator.xiaohongshu.com/login') ? LOGIN : url.startsWith('https://creator.xiaohongshu.com/new/home') ? HOME : undefined
-          return body ? route.fulfill({ contentType: 'text/html; charset=utf-8', body }) : route.abort()
+          const path = Object.keys(pages).find((p) => url.startsWith(`https://creator.xiaohongshu.com${p}`))
+          return path ? route.fulfill({ contentType: 'text/html; charset=utf-8', body: pages[path] }) : route.abort()
         })
         opened.push(b)
         return b
@@ -427,14 +462,33 @@ describe.skipIf(!EDGE)('Rednote sign-in, in Edge', () => {
     return opened[0]
   }
 
-  it('connects once Rednote’s sign-in cookie appears, even with the first tab still on the sign-in page', async () => {
+  it('waits for the creator site’s own sign-in, not just the shared login, in whichever tab it ends', async () => {
     const { ctx, opened } = rednoteCtx()
-    const connecting = rednote.connect(ctx, { label: 'Mine' })
+    let done = false
+    const connecting = rednote.connect(ctx, { label: 'Mine' }).finally(() => (done = true))
     const win = await signInShown(opened)
+    // The scan's shared login alone: the creator site still says signed out, so the window stays.
+    await win.addCookies([{ name: 'customer-sso-sid', value: 's', domain: '.xiaohongshu.com', path: '/' }])
+    await new Promise((r) => setTimeout(r, 5000))
+    expect(done).toBe(false)
     await win.addCookies(session())
     const t0 = Date.now()
     expect(await connecting).toMatchObject({ name: 'Mine', remoteUserId: '5f00aa' })
-    expect(Date.now() - t0).toBeLessThan(6000)
+    // The first tab never leaves the sign-in page here: OneDraft gives it a few seconds to, then connects anyway.
+    expect(Date.now() - t0).toBeLessThan(14_000)
+  }, 60_000)
+
+  it('says “signed out” when the creator site turns its page into the sign-in page, not that a box is missing', async () => {
+    const { ctx, opened } = rednoteCtx({ '/publish/publish': "<p>加载中</p><script>setTimeout(() => (location.href = '/login?source=&redirectReason=401'), 3500)</script>" })
+    const clip = join(tempDir(), 'clip.mp4')
+    writeFileSync(clip, 'not really a video')
+    const account = { id: 'r', platform: 'rednote', name: 'Rednote', status: 'connected', meta: { profileKey: 'k' } } as unknown as Account
+    const post: ResolvedContent = { title: 'Hi', caption: 'Hello', tags: [], media: [clip], options: {}, aiGenerated: false }
+    try {
+      await expect(rednote.publish(ctx, account, { targetId: 't', content: post })).rejects.toBeInstanceOf(NeedsLoginError)
+    } finally {
+      for (const b of opened) await b.close().catch(() => undefined)
+    }
   }, 60_000)
 
   it('also connects on a creator page past the sign-in in another tab, should Rednote rename its cookies', async () => {

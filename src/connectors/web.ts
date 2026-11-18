@@ -11,7 +11,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import type { BrowserContext, Locator, Page } from 'playwright-core'
 import { CanceledError, ContentError, NeedsLoginError, RetryableError, type ConnectorContext, type ConnectResult, type PublishRequest, type PublishResult, type WebCookie } from '../core/connector'
 import { captionWithHashtags, weightedLength } from '../core/validate'
@@ -76,12 +76,16 @@ export const WEB_SELECTORS: Record<WebPlatform, Record<string, string[]>> = {
     attachments: ["[role='dialog'] [data-testid='attachments']", "[data-testid='attachments']"]
   },
   bilibili: {
-    fileInput: ["input[type='file'][accept*='mp4']", "input[type='file'][accept*='video']", "input[type='file']"],
+    /** The "Upload Video" area: a click on it opens the uploader's file box. */
+    uploadArea: ['.bcc-upload-wrapper .upload-area', 'div.upload-area'],
+    /** The uploader's own (BUploader's) hidden file box first: the upload area's own box starts nothing any more. */
+    fileInput: ["input[name='buploader'][accept*='mp4']", "input[type='file'][accept*='mp4']", "input[type='file'][accept*='video']"],
     /** Appears once the upload starts, holding the file name. */
     title: ["input[maxlength='80'][type='text']", "input.input-val[type='text'][maxlength='80']", "input[placeholder*='标题']"],
     /** The close buttons of the tags Bilibili suggests by itself. */
     tagRemove: ['div.tag-pre-wrp .label-item-v2-close'],
-    tags: ["input[placeholder='按回车键Enter创建标签']", "input[placeholder*='回车']", "input[placeholder*='Enter']"],
+    // The Chinese page's placeholder, then the box inside the tag area (the English page words it otherwise).
+    tags: ["input[placeholder='按回车键Enter创建标签']", '.tag-input-wrp input', "input[placeholder*='回车']", "input[placeholder*='Enter']"],
     description: ["div.ql-editor[contenteditable='true']", 'div.ql-editor']
   }
 }
@@ -100,6 +104,11 @@ interface Site {
   loginPage: RegExp
   /** The button that posts, as the person sees it (default “Post”). */
   press?: string
+  /**
+   * Whether a password box on the site's pages means it is asking to sign in (default yes: Instagram shows its sign-in
+   * form at the same address). Sites that send a signed-out visitor to their sign-in page say no.
+   */
+  passwordBox?: boolean
 }
 
 /** The site's domain or one under it (x.com and api.x.com, not notx.com). */
@@ -175,7 +184,9 @@ export const SITES: Record<WebPlatform, Site> = {
     uploadUrl: 'https://member.bilibili.com/platform/upload/video/frame',
     // Signed out, the creator centre sends you to passport.bilibili.com (/login, or /pc/passport/login).
     loginPage: /^https:\/\/passport\.bilibili\.com\//,
-    press: '立即投稿 (Submit)'
+    press: '立即投稿 (Submit)',
+    // That redirect (checked) says signed out; a password box seen while the creator centre loads is something else.
+    passwordBox: false
   }
 }
 
@@ -386,7 +397,7 @@ class Filler {
       }
       this.unresponsive = list.length > 0 && !answered
       // A sign-in form instead of the page (Instagram shows one without changing the address).
-      if (round % 4 === 0 && (await this.passwordBox())) throw signedOut(SITES[this.platform])
+      if (round % 4 === 0 && SITES[this.platform].passwordBox !== false && (await this.passwordBox())) throw signedOut(SITES[this.platform])
       if (Date.now() > deadline) {
         // A page whose script is stuck can't be searched: that isn't a missing button.
         if (this.unresponsive) throw new Error('the page stopped responding')
@@ -473,6 +484,7 @@ async function loggedOut(site: Site, page: Page, browser: BrowserContext): Promi
   if (site.loginPage.test(page.url())) return true
   const cookies = await bounded(browser.cookies(), 5000).catch(() => undefined)
   if (cookies && !signedIn(site)(cookies)) return true
+  if (site.passwordBox === false) return false
   return (await bounded(page.locator("input[type='password']").filter({ visible: true }).count(), 3000).catch(() => 0)) > 0
 }
 
@@ -648,11 +660,25 @@ const FILL: Record<WebPlatform, Fill> = {
 
   async bilibili(f, content, publishAt) {
     const video = content.media.find(isVideo)!
-    await (await f.find('fileInput', 45_000, true)).setInputFiles(video)
+    // Bilibili's uploader (BUploader) keeps a hidden file box of its own, which a click on the upload area opens; a
+    // file put in the upload area's own hidden box starts nothing (seen 2026-11-17). So OneDraft clicks the area and
+    // answers the file box that opens, as a person would; the uploader's box is the fallback.
+    let attached = false
+    const area = await f.maybe('uploadArea', 45_000)
+    if (area) {
+      f.check()
+      const chooser = f.page.waitForEvent('filechooser', { timeout: 10_000 }).catch(() => undefined)
+      await area.click({ timeout: 10_000 }).catch(() => undefined)
+      const box = await chooser
+      if (box) attached = await bounded(box.setFiles(video), 30_000).then(() => true, () => false)
+    }
+    if (!attached) await (await f.find('fileInput', 15_000, true)).setInputFiles(video)
     f.ctx.progress(0.3, 'Uploading to Bilibili')
     // The form appears once the upload starts, its title set to the file name: replaced. Filling in doesn't wait for
     // the upload (a big video takes longer than OneDraft gives a page); the person presses 立即投稿 once it's done.
-    if (!(await f.setValue(await f.find('title', 120_000), cut(content.title, 80)))) f.notes.push(`Check the title: ${KEPT}.`)
+    const titleBox = await f.maybe('title', 120_000)
+    if (!titleBox) throw new NotFound(`Bilibili didn’t start the upload; press Upload Video (上传视频) and choose ${basename(video)}`)
+    if (!(await f.setValue(titleBox, cut(content.title, 80)))) f.notes.push(`Check the title: ${KEPT}.`)
     const description = cut(content.caption, 2000)
     const desc = await f.maybe('description', 8000)
     if (desc) {
@@ -688,10 +714,11 @@ const FILL: Record<WebPlatform, Fill> = {
     if (o.dynamic) f.notes.push(`Add the feed text (粉丝动态): ${String(o.dynamic)}`)
     if (content.cover) f.notes.push(`To use your cover, set it under 封面: ${content.cover}`)
     if (content.aiGenerated) f.notes.push(AI_NOTE.bilibili)
-    const go = 'press 立即投稿 (Submit) once the upload says 上传完成'
+    // Bilibili shows its page in Chinese or English: both names are given.
+    const go = 'press 立即投稿 (Submit) once the upload says 上传完成 (Upload complete)'
     return publishAt
-      ? `Check the details and the category (分区). To post it at ${when(publishAt)}, turn on 定时发布 (scheduled), set that time, and ${go}.`
-      : `Check the details and the category (分区), and ${go}.`
+      ? `Check the details and the category (分区 / Category). To post it at ${when(publishAt)}, turn on 定时发布 (Scheduled), set that time, and ${go}.`
+      : `Check the details and the category (分区 / Category), and ${go}.`
   }
 }
 
@@ -797,6 +824,9 @@ export async function webPublish(platform: WebPlatform, ctx: ConnectorContext, a
       throw new Error(`The ${site.name} window was closed before the post was ready. Press Retry to open it again.`)
     }
     if (e instanceof NeedsLoginError || (browser && (await loggedOut(site, page, browser)))) {
+      // What the site showed, to check it really asked to sign in (the tab closes next).
+      const shot = await snapshot(page, ctx, `${platform}-signedout`)
+      if (shot) ctx.log(`${site.name} looked signed out (screenshot: ${shot})`, 'warn')
       await drop()
       throw e instanceof NeedsLoginError ? e : signedOut(site)
     }

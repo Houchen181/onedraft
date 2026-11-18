@@ -5,6 +5,11 @@
 // Signing in is done here, not by `biliup login`: that one is an interactive menu that needs a real terminal (it
 // fails with "not a terminal" when started from an app). OneDraft runs the same QR-code login biliup uses (Bilibili's
 // TV login with biliup's app key), shows the code in its Connect window, and saves the result as biliup's cookie file.
+//
+// Bilibili keeps some accounts out of that TV login (48007 当前账号暂不支持在本APP登录: accounts without a mainland
+// China phone number, for one), and biliup also submits through the TV app, so those accounts can't post with biliup
+// at all. They sign in on Bilibili's website instead (web.ts): OneDraft fills in the creator centre's upload page and
+// the person presses 立即投稿.
 
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -19,6 +24,7 @@ import {
 } from '../core/connector'
 import { getJson, sleep } from '../core/http'
 import type { Account } from '../shared/types'
+import { isWeb, WEB_FIELDS, WEB_SELECTOR_SETTING, webCheck, webConnect, webDisconnect, webPublish } from './web'
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36'
 
@@ -117,6 +123,11 @@ export async function qrLogin(ctx: ConnectorContext, stop?: AbortSignal): Promis
       }
       if (r.code === 86039 || r.code === 86090) continue // not scanned, or scanned but not confirmed yet
       if (r.code === 86038) break // expired: make a new one
+      // Bilibili keeps this account out of the TV-app login, here and in Bilibili's own TV app.
+      if (r.code === 48007)
+        throw new Error(
+          `Bilibili doesn’t let this account sign in with this QR code (48007 ${r.message ?? ''}). It does that to some accounts, such as ones without a mainland China phone number. Choose “Sign in with your browser” above instead: it signs in on Bilibili’s website, which these accounts can use.`
+        )
       throw new Error(`Bilibili didn’t accept the login (${r.code} ${r.message ?? ''}). Press Connect to try again.`)
     }
   }
@@ -257,7 +268,8 @@ export const bilibili: Connector = {
       media: { required: true, maxVideos: 1 }
     },
     settings: [
-      { key: 'biliupPath', label: 'biliup.exe path', type: 'path', help: 'Leave empty to use the copy OneDraft downloads when you connect.' }
+      { key: 'biliupPath', label: 'biliup.exe path', type: 'path', help: 'Leave empty to use the copy OneDraft downloads when you connect.' },
+      WEB_SELECTOR_SETTING
     ],
     connectFields: [
       {
@@ -294,16 +306,39 @@ export const bilibili: Connector = {
     notes: [
       'Bilibili’s AI-content declaration can’t be set by uploaders: turn it on in the creator centre after posting AI content.',
       'Scheduled posts must be 4 hours to 15 days ahead to be held by Bilibili; otherwise OneDraft posts at the time.'
-    ]
+    ],
+    web: {
+      signIn:
+        'A browser window opens on Bilibili’s sign-in page. Scan its QR code with the Bilibili app, or sign in another way; the window closes by itself once you’re in, and OneDraft keeps that sign-in for this account.',
+      fields: WEB_FIELDS,
+      notes: [
+        'For accounts Bilibili won’t let sign in with the QR code (error 48007).',
+        'When you post, OneDraft opens Bilibili’s upload page in that window, adds your video, title, description and tags, and you press 立即投稿 (Submit). You choose the category there.',
+        'View counts in OneDraft need the QR-code way.'
+      ],
+      // Reminded of in the note: the person sets them on the page.
+      options: ['copyright', 'source', 'dynamic'],
+      constraints: { tags: { style: 'field', required: true, max: 10, maxEach: 20 } },
+      press: '立即投稿 (Submit)',
+      other: {
+        label: 'Scan a QR code',
+        pill: 'posts by itself',
+        text: 'Scan a code with the Bilibili app right here. OneDraft then uploads and posts by itself, with biliup. Some accounts can’t sign in this way (error 48007).',
+        first: true
+      }
+    }
   },
 
-  validate(content) {
+  validate(content, account) {
     const issues = []
     if (content.aiGenerated)
       issues.push({
         level: 'warning' as const,
         field: 'aiGenerated',
-        message: 'After it uploads, turn on the AI-content declaration in Bilibili’s creator centre (required for AI content; biliup cannot set it).'
+        message:
+          account && isWeb(account)
+            ? 'Turn on the AI-content declaration on Bilibili’s upload page before you press 立即投稿 (required for AI content).'
+            : 'After it uploads, turn on the AI-content declaration in Bilibili’s creator centre (required for AI content; biliup cannot set it).'
       })
     if (content.options.copyright === '2' && !String(content.options.source ?? '').trim())
       issues.push({ level: 'error' as const, field: 'options.source', message: 'Reposts need a source.' })
@@ -311,6 +346,8 @@ export const bilibili: Connector = {
   },
 
   async connect(ctx, input) {
+    // Signed in on the website, the account posts through Bilibili's own page: no biliup.
+    if (input.method === 'web' || (!input.method && input._profileKey)) return webConnect('bilibili', ctx, input)
     // biliup does the uploads: fetch it while the person scans the code.
     if (missingConfigured(ctx)) throw new Error(notInstalled(ctx))
     if (!biliupPath(ctx) && input.install === 'false') throw new Error('biliup isn’t installed. Set its path under Options, or allow the download.')
@@ -351,12 +388,14 @@ export const bilibili: Connector = {
   },
 
   async disconnect(ctx, account) {
+    if (isWeb(account)) return webDisconnect(ctx, account)
     // The saved login holds the account's tokens (only ever a file inside OneDraft's own folder).
     const file = cookiePath(account)
     if (file && insideFolder(ctx.paths.data, file)) rmSync(file, { force: true })
   },
 
   async check(ctx, account) {
+    if (isWeb(account)) return webCheck('bilibili', ctx, account)
     const exe = biliupPath(ctx)
     if (!exe) return { ok: false, note: notInstalled(ctx) }
     if (!cookiePath(account) || !existsSync(cookiePath(account))) throw new NeedsLoginError('The saved Bilibili login is missing. Press Connect to sign in again.')
@@ -366,7 +405,9 @@ export const bilibili: Connector = {
     return { ok: true, name: me.name }
   },
 
-  async publish(ctx, account, { content, publishAt }) {
+  async publish(ctx, account, req) {
+    if (isWeb(account)) return webPublish('bilibili', ctx, account, req)
+    const { content, publishAt } = req
     const exe = biliupPath(ctx)
     if (!exe) throw new Error(notInstalled(ctx))
     const o = content.options

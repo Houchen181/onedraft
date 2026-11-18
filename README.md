@@ -122,7 +122,7 @@ In Settings → Platforms, press **Connect** next to a platform and sign in. No 
 | Platform | Connecting | Posting |
 |---|---|---|
 | Rednote | A browser window opens on Rednote's creator site; scan the QR code with the Rednote app | OneDraft fills in the note and you press Publish (Rednote penalises automated accounts). |
-| Bilibili | A QR code appears in OneDraft; scan it with the Bilibili app (the first time, OneDraft downloads [biliup](https://github.com/biliup/biliup), MIT) | OneDraft uploads by itself. Turn on the AI-content declaration in the creator centre yourself. |
+| Bilibili | A QR code appears in OneDraft; scan it with the Bilibili app (the first time, OneDraft downloads [biliup](https://github.com/biliup/biliup), MIT). If Bilibili refuses your account there (error 48007, e.g. no mainland China phone number), choose *Sign in with your browser*: a window opens on Bilibili's own sign-in page | With the QR code, OneDraft uploads by itself; turn on the AI-content declaration in the creator centre yourself. Signed in with the browser, OneDraft fills in Bilibili's upload page and you press 立即投稿. |
 | YouTube, TikTok, Instagram, X | A browser window opens on the site's sign-in page; sign in as usual and it closes by itself | OneDraft opens the site's own upload page, signed in as you, with your media attached and text filled in, and you press Post. |
 
 The sign-in window is a plain browser window: OneDraft only watches it for the sign-in and attaches no automation

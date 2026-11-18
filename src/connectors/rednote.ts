@@ -81,9 +81,56 @@ async function snapshot(page: Page | undefined, ctx: ConnectorContext, label: st
   }
 }
 
+type Cookies = Awaited<ReturnType<BrowserContext['cookies']>>
+
+/** A browser call that can't wait forever (a busy page never answers). */
+function within<T>(p: Promise<T>, ms: number): Promise<T> {
+  let t: ReturnType<typeof setTimeout> | undefined
+  const late = new Promise<never>((_, reject) => (t = setTimeout(() => reject(new Error('the browser stopped responding')), ms)))
+  return Promise.race([p, late]).finally(() => clearTimeout(t))
+}
+
+/**
+ * Cookies Rednote's creator site sets once someone signs in (a visitor gets only a1, webId, gid, xsecappid and the
+ * like). The names are the ones community tools' cookie exports show; any one of them counts.
+ */
+const SESSION_COOKIES = ['galaxy_creator_session_id', 'access-token-creator.xiaohongshu.com', 'customer-sso-sid']
+
+export const rednoteSession = (cookies: { name: string; value: string; domain: string }[]) =>
+  cookies.some((c) => SESSION_COOKIES.includes(c.name) && !!c.value && /^(.+\.)?xiaohongshu\.com$/.test(c.domain.replace(/^\./, '').toLowerCase()))
+
+/**
+ * Signed in? Rednote's creator pages send anyone who isn't to /login (?redirectReason=401). A sign-in cookie settles
+ * it; without one, a sign-in box over the page means signed out.
+ */
 async function isLoggedIn(page: Page, ctx: ConnectorContext): Promise<boolean> {
   if (page.url().includes('/login')) return false
+  if (rednoteSession(await within(page.context().cookies(), 5000).catch(() => []))) return true
   return !(await maybe(page, ctx, 'loginBox', 800))
+}
+
+/** A creator page past the sign-in, in any tab (the sign-in may end in a tab of its own). */
+async function pastSignIn(browser: BrowserContext, ctx: ConnectorContext): Promise<boolean> {
+  for (const p of browser.pages()) {
+    if (p.isClosed() || !p.url().startsWith(`${CREATOR}/`) || p.url().includes('/login')) continue
+    if (await isLoggedIn(p, ctx).catch(() => false)) return true
+  }
+  return false
+}
+
+/** The cookies a closed window left in the profile (OneDraft's browser opens it again, out of sight, to read them). */
+async function savedCookies(ctx: ConnectorContext, key: string, closed: BrowserContext): Promise<Cookies> {
+  await closed.close().catch(() => undefined)
+  try {
+    const b = await ctx.browser(key, { headless: true, locale: 'zh-CN' })
+    try {
+      return await within(b.cookies(), 10_000)
+    } finally {
+      await b.close().catch(() => undefined)
+    }
+  } catch {
+    return []
+  }
 }
 
 const profileKey = (account: Account) => account.meta.profileKey as string
@@ -187,23 +234,35 @@ export const rednote: Connector = {
     ctx.signal?.addEventListener('abort', onAbort, { once: true })
     try {
       browser = await ctx.browser(key, { headless: false, locale: 'zh-CN' })
-      page = browser.pages()[0] ?? (await browser.newPage())
+      const win = browser
+      page = win.pages()[0] ?? (await win.newPage())
       if (ctx.signal?.aborted) throw canceled()
       await page.goto(`${CREATOR}/login`, { waitUntil: 'domcontentloaded' })
       ctx.log('Scan the QR code in the browser window with the Rednote app (switch to QR-code login if needed).')
+      const open = () => win.pages().some((p) => !p.isClosed())
+      /** The window's cookies at the last look: closing it right after signing in still counts. */
+      let cookies: Cookies = []
       const deadline = Date.now() + 5 * 60_000
       let signedIn = false
-      while (!signedIn && Date.now() < deadline) {
+      while (!signedIn && open() && Date.now() < deadline) {
         if (ctx.signal?.aborted) throw canceled()
-        if (page.isClosed()) throw closedEarly()
         await new Promise((r) => setTimeout(r, 2000))
-        // Signed in = on Rednote's creator site, past its login page, with no login box showing (an error page or
-        // any other site doesn't count).
-        signedIn = !page.isClosed() && page.url().startsWith(`${CREATOR}/`) && !page.url().includes('/login') && (await isLoggedIn(page, ctx).catch(() => false))
+        if (ctx.signal?.aborted) throw canceled()
+        cookies = (await within(win.cookies(), 5000).catch(() => undefined)) ?? cookies
+        // Rednote's sign-in cookies, whichever tab the sign-in ends in; or, should Rednote rename them, a creator
+        // page past the sign-in (an error page or another site doesn't count).
+        signedIn = rednoteSession(cookies) || (await pastSignIn(win, ctx))
+      }
+      if (ctx.signal?.aborted) throw canceled()
+      if (!signedIn && !open()) {
+        // The person closed the window: signed in by then? The profile keeps what the window had.
+        if (!rednoteSession(cookies)) cookies = await savedCookies(ctx, key, win)
+        signedIn = rednoteSession(cookies)
+        if (!signedIn) throw closedEarly()
       }
       if (!signedIn) throw new Error('Not signed in after 5 minutes. Press Connect to try again.')
-      const cookies = await browser.cookies(CREATOR)
-      const uid = cookies.find((c) => /user.?id/i.test(c.name))?.value
+      const mine = cookies.filter((c) => /^(.+\.)?xiaohongshu\.com$/.test(c.domain.replace(/^\./, '').toLowerCase()))
+      const uid = (mine.find((c) => c.name === 'x-user-id-creator.xiaohongshu.com') ?? mine.find((c) => /user.?id/i.test(c.name)))?.value
       return {
         name: input.label?.trim() || 'Rednote account',
         remoteUserId: uid ?? key,

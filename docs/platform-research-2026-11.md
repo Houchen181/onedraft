@@ -138,6 +138,22 @@ website** (`src/connectors/web.ts`), the default; the official APIs stay as the 
   - **Found in 0.1.3**: Chromium sets `navigator.webdriver` for `--remote-debugging-pipe` (as for `--enable-automation`
     and `--headless`), and Google's sign-in then refuses the window ("Couldn't sign you in: this browser or app may
     not be secure"). `--disable-blink-features=AutomationControlled` turns it off; measured on Edge 157, headed.
+  - **Found in 0.1.4**: Bilibili's TV-app QR login (biliup's) answers `48007 当前账号暂不支持在本APP登录` for some
+    accounts, such as ones registered with Google or email that have no mainland China phone number. Bilibili's own
+    TV app is refused the same way ([newBV #322](https://github.com/Frost819/newBV/issues/322); [PiliBTRTV #1](https://github.com/gordonpow/PiliBTRTV/issues/1)
+    saw the HD app's SMS login refused too). biliup also *submits* through the TV app (`submit_by_app` signs with the
+    TV key), so these accounts can't post with biliup at all. Bilibili's website login takes them, so Bilibili got the
+    website way: sign in on passport.bilibili.com and fill in member.bilibili.com/platform/upload/video/frame, with
+    selectors from MultiPost-Extension's Bilibili uploader. Signed out, that page redirects to
+    passport.bilibili.com/login (checked). The TV QR endpoint also makes codes for biliup's Android key
+    (`783bbb72…`); it answers -403 for `1d8b6e7d…` and for the BCut key.
+  - **Found in 0.1.4**: Rednote's sign-in window stayed open after signing in. OneDraft counted a sign-in only on the
+    first tab, on creator.xiaohongshu.com past /login, with nothing whose class contains "login-box" showing. Closing
+    the window then deleted the new profile, sign-in included. It now counts Rednote's creator sign-in cookies
+    (`galaxy_creator_session_id`, `access-token-creator.xiaohongshu.com`, `customer-sso-sid`, as community tools'
+    cookie exports show; a visitor gets only `a1`, `webId`, `gid`, `xsecappid` and the like) in any tab. A creator
+    page past the sign-in, in any tab, still counts too. A closed window's profile is read again before giving up.
+    Signed out, creator pages redirect to /login?redirectReason=401 (checked).
   - A natively scheduled target keeps status `scheduled` after its time: "still to go out" needs `scheduled_at > now`.
   - bsdtar killed mid-unpack leaves a truncated exe: unpack beside the target and move it into place when complete.
   - PowerShell's `-WorkingDirectory` takes wildcards (`[`/`]` need escaping); `Start-Process` with a `.cmd` lets cmd.exe

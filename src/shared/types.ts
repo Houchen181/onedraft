@@ -271,8 +271,9 @@ export interface PlatformManifest {
   signIn?: string
   /**
    * The platform can also be connected by signing in on its website in a window OneDraft keeps (no developer app):
-   * posts are filled in on the site's own upload page and the person presses Post. Offered first when present;
-   * `signIn`/`guide`/`connectFields` then describe the official-API way.
+   * posts are filled in on the site's own upload page and the person presses Post. Offered first when present
+   * (unless `other.first`); `signIn`/`guide`/`connectFields` then describe the other way (the official API, or
+   * Bilibili's QR code).
    */
   web?: {
     signIn: string
@@ -283,6 +284,13 @@ export interface PlatformManifest {
     options?: string[]
     /** Where the website takes other media than the API (merged over `constraints`, group by group). */
     constraints?: Partial<Constraints>
+    /** The site's button that posts, as the person sees it (default "Post"). */
+    press?: string
+    /**
+     * How Connect names the platform's other way (default: the official API, which needs a developer app), and
+     * whether to offer that way first.
+     */
+    other?: { label: string; pill: string; text: string; first?: boolean }
   }
   /** Step-by-step walkthrough of the one-time setup on the platform's site (its own developer app). */
   guide?: SetupGuide

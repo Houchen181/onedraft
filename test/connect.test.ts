@@ -85,6 +85,22 @@ describe('Bilibili QR-code login', () => {
     })
   })
 
+  it('sends an account Bilibili keeps out of the QR login (48007) to the website way', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    const ctx = fakeCtx({
+      showQr: () => undefined,
+      fetch: (async (url: string) =>
+        url.endsWith('/qrcode/auth_code')
+          ? json({ code: 0, data: { url: 'https://passport.bilibili.com/x/passport-tv-login/h5/qrcode/auth?auth_code=c1', auth_code: 'c1' } })
+          : json({ code: 48007, message: '当前账号暂不支持在本APP登录' })) as typeof fetch
+    })
+    const login = qrLogin(ctx)
+    login.catch(() => undefined)
+    await vi.advanceTimersByTimeAsync(1500)
+    vi.useRealTimers()
+    await expect(login).rejects.toThrow(/48007 当前账号暂不支持在本APP登录.*“Sign in with your browser”/)
+  })
+
   it('says what went wrong when Bilibili refuses', async () => {
     const ctx = fakeCtx({ fetch: (async () => json({ code: -3, message: 'API校验密匙错误' })) as unknown as typeof fetch })
     await expect(qrLogin(ctx)).rejects.toThrow(/wouldn’t make a login QR code \(-3/)

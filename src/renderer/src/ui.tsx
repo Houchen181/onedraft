@@ -121,9 +121,10 @@ function CopyValue({ label, value }: { label: string; value: string }) {
 export function ConnectDialog({ platform: p, onClose, onSaved }: { platform: PlatformManifest; onClose: () => void; onSaved?: () => void }) {
   const app = useApp()
   const existing = app.accountFor(p.id)
-  // Platforms you can connect by signing in on their website offer that first: no developer app needed.
+  // Platforms you can connect by signing in on their website offer that first (no developer app needed), unless their
+  // other way needs no setup either and posts by itself (Bilibili's QR code). An account keeps the way it was made.
   const [method, setMethod] = useState<'web' | 'api'>(() =>
-    !p.web ? 'api' : existing && existing.meta.method !== 'web' ? 'api' : 'web'
+    !p.web ? 'api' : existing ? (existing.meta.method === 'web' ? 'web' : 'api') : p.web.other?.first ? 'api' : 'web'
   )
   const web = method === 'web' && !!p.web
   const g = web ? undefined : p.guide
@@ -233,6 +234,28 @@ export function ConnectDialog({ platform: p, onClose, onSaved }: { platform: Pla
   }
   const signIn = web ? p.web!.signIn : (p.signIn ?? HOW[p.kind])
   const notes = web ? (p.web?.notes ?? []) : p.notes
+  const other = p.web?.other
+  const webWay = (
+    <label key="web" className={`method${web ? ' on' : ''}`}>
+      <input type="radio" name="method" checked={web} disabled={busy} onChange={() => setMethod('web')} />
+      <div>
+        <b>Sign in with your browser</b> <span className="pill ok">no setup</span>
+        <div className="small muted">
+          A window opens where you sign in to {p.name} as usual. When you post, OneDraft fills in the post on {p.name}’s own page and you press{' '}
+          {p.web?.press ?? 'Post'}.
+        </div>
+      </div>
+    </label>
+  )
+  const otherWay = (
+    <label key="other" className={`method${!web ? ' on' : ''}`}>
+      <input type="radio" name="method" checked={!web} disabled={busy} onChange={() => setMethod('api')} />
+      <div>
+        <b>{other?.label ?? 'Official API'}</b> <span className="pill">{other?.pill ?? `advanced${p.guide ? ` · ${p.guide.time} setup` : ''}`}</span>
+        <div className="small muted">{other?.text ?? 'Needs a developer app of your own. OneDraft then posts by itself and reads comments and numbers.'}</div>
+      </div>
+    </label>
+  )
 
   return (
     <Modal onClose={busy ? undefined : close} wide={!!g || !!p.web}>
@@ -243,22 +266,7 @@ export function ConnectDialog({ platform: p, onClose, onSaved }: { platform: Pla
       {existing && <div className="note" style={{ marginBottom: 10 }}>OneDraft keeps one account per platform. Signing in again replaces {existing.name}; drafts and scheduled posts move to the new account.</div>}
       {p.web && (
         <div className="methods" role="radiogroup" aria-label="How to connect">
-          <label className={`method${web ? ' on' : ''}`}>
-            <input type="radio" name="method" checked={web} disabled={busy} onChange={() => setMethod('web')} />
-            <div>
-              <b>Sign in with your browser</b> <span className="pill ok">no setup</span>
-              <div className="small muted">
-                A window opens where you sign in to {p.name} as usual. When you post, OneDraft fills in the post on {p.name}’s own page and you press Post.
-              </div>
-            </div>
-          </label>
-          <label className={`method${!web ? ' on' : ''}`}>
-            <input type="radio" name="method" checked={!web} disabled={busy} onChange={() => setMethod('api')} />
-            <div>
-              <b>Official API</b> <span className="pill">advanced{p.guide ? ` · ${p.guide.time} setup` : ''}</span>
-              <div className="small muted">Needs a developer app of your own. OneDraft then posts by itself and reads comments and numbers.</div>
-            </div>
-          </label>
+          {other?.first ? [otherWay, webWay] : [webWay, otherWay]}
         </div>
       )}
       {g && !settings ? (

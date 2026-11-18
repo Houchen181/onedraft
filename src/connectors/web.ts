@@ -18,12 +18,13 @@ import { captionWithHashtags, weightedLength } from '../core/validate'
 import type { Account, Constraints, FieldSpec, Issue, ResolvedContent } from '../shared/types'
 import { isVideo } from './util'
 
-export type WebPlatform = 'youtube' | 'tiktok' | 'instagram' | 'x'
+export type WebPlatform = 'youtube' | 'tiktok' | 'instagram' | 'x' | 'bilibili'
 
 /**
  * Selector lists per platform; each entry is tried in order. Text ones come in English and Simplified Chinese.
  * Checked 2026-11-17 against maintained uploaders' source (social-auto-upload, QianFan-Sync, MultiPost-Extension,
  * tiktok-uploader, opencli, youtube-uploader; see docs/platform-research-2026-11.md), not against the live sites.
+ * Bilibili's follow MultiPost-Extension's video uploader (src/sync/video/bilibili.ts), on the same page.
  */
 export const WEB_SELECTORS: Record<WebPlatform, Record<string, string[]>> = {
   youtube: {
@@ -73,6 +74,15 @@ export const WEB_SELECTORS: Record<WebPlatform, Record<string, string[]>> = {
       "[data-testid='tweetTextarea_0']"
     ],
     attachments: ["[role='dialog'] [data-testid='attachments']", "[data-testid='attachments']"]
+  },
+  bilibili: {
+    fileInput: ["input[type='file'][accept*='mp4']", "input[type='file'][accept*='video']", "input[type='file']"],
+    /** Appears once the upload starts, holding the file name. */
+    title: ["input[maxlength='80'][type='text']", "input.input-val[type='text'][maxlength='80']", "input[placeholder*='标题']"],
+    /** The close buttons of the tags Bilibili suggests by itself. */
+    tagRemove: ['div.tag-pre-wrp .label-item-v2-close'],
+    tags: ["input[placeholder='按回车键Enter创建标签']", "input[placeholder*='回车']", "input[placeholder*='Enter']"],
+    description: ["div.ql-editor[contenteditable='true']", 'div.ql-editor']
   }
 }
 
@@ -88,6 +98,8 @@ interface Site {
   uploadUrl: string
   /** Where the site sends someone whose sign-in has expired. */
   loginPage: RegExp
+  /** The button that posts, as the person sees it (default “Post”). */
+  press?: string
 }
 
 /** The site's domain or one under it (x.com and api.x.com, not notx.com). */
@@ -151,6 +163,19 @@ export const SITES: Record<WebPlatform, Site> = {
     uploadUrl: 'https://x.com/compose/post',
     // The older sign-in flow and the newer onboarding one (?mode=login).
     loginPage: /^https:\/\/(x|twitter)\.com\/((i\/flow\/)?login|i\/jf\/onboarding)/
+  },
+  bilibili: {
+    name: 'Bilibili',
+    // The website's own sign-in, which takes accounts Bilibili keeps out of the TV-app login biliup uses (48007).
+    signInUrl: 'https://passport.bilibili.com/login',
+    cookies: ['SESSDATA'],
+    domain: 'bilibili.com',
+    remoteId: (c) => idFrom(cookie(c, 'DedeUserID', 'bilibili.com')),
+    // The creator centre's uploader without the centre around it (what MultiPost-Extension opens too).
+    uploadUrl: 'https://member.bilibili.com/platform/upload/video/frame',
+    // Signed out, the creator centre sends you to passport.bilibili.com (/login, or /pc/passport/login).
+    loginPage: /^https:\/\/passport\.bilibili\.com\//,
+    press: '立即投稿 (Submit)'
   }
 }
 
@@ -290,6 +315,7 @@ const WHAT: Record<string, string> = {
   newPost: 'the New post button',
   next: 'the Next button',
   ready: 'the post form (the upload may still be starting)',
+  tags: 'the tag box',
   attachments: 'the attached media',
   visibility: 'the Visibility step',
   notForKids: 'the “made for kids” choice',
@@ -404,6 +430,17 @@ class Filler {
     return false
   }
 
+  /**
+   * Replace a plain text box's value and read it back; false if the page doesn't keep it. fill() fires the input
+   * events Vue and React listen to (type() above is for editors, whose text an input's innerText doesn't show).
+   */
+  async setValue(box: Locator, text: string): Promise<boolean> {
+    this.check()
+    if (!(await bounded(box.fill(text, { timeout: 5000 }), 8000).then(() => true, () => false))) return false
+    this.check()
+    return (await bounded(box.inputValue({ timeout: 3000 }), 5000).catch(() => undefined)) === text
+  }
+
   /** Keystrokes, given up on when the page stops taking them (a busy page never answers). */
   async keys(press: () => Promise<void>, ms = 10_000) {
     this.check()
@@ -484,7 +521,8 @@ const AI_NOTE: Record<WebPlatform, string> = {
   youtube: 'This video is marked as made with AI: on Details, under “Altered content”, choose Yes.',
   tiktok: 'This video is marked as made with AI: under Show more, turn on “AI-generated content”.',
   instagram: 'This post is marked as made with AI: if Instagram offers “Add AI label” (under Advanced settings), turn it on.',
-  x: 'This post is marked as made with AI; X’s website has no label for that, so say so in the text if you need to.'
+  x: 'This post is marked as made with AI; X’s website has no label for that, so say so in the text if you need to.',
+  bilibili: 'This video is marked as made with AI: turn on Bilibili’s AI-content declaration on the page before you press 立即投稿.'
 }
 
 const KEPT = 'the page didn’t keep what OneDraft typed'
@@ -606,6 +644,54 @@ const FILL: Record<WebPlatform, Fill> = {
     if (weightedLength(text) > 280) f.notes.push('The text is longer than 280 characters, which X posts only with Premium: otherwise shorten it, or split it into a thread with the + button.')
     if (content.aiGenerated) f.notes.push(AI_NOTE.x)
     return publishAt ? `Check the post. To post it later, press the schedule (calendar) button, set ${when(publishAt)} and confirm.` : 'Check the post and press Post.'
+  },
+
+  async bilibili(f, content, publishAt) {
+    const video = content.media.find(isVideo)!
+    await (await f.find('fileInput', 45_000, true)).setInputFiles(video)
+    f.ctx.progress(0.3, 'Uploading to Bilibili')
+    // The form appears once the upload starts, its title set to the file name: replaced. Filling in doesn't wait for
+    // the upload (a big video takes longer than OneDraft gives a page); the person presses 立即投稿 once it's done.
+    if (!(await f.setValue(await f.find('title', 120_000), cut(content.title, 80)))) f.notes.push(`Check the title: ${KEPT}.`)
+    const description = cut(content.caption, 2000)
+    const desc = await f.maybe('description', 8000)
+    if (desc) {
+      if (!(await f.type(desc, description))) f.notes.push(`Check the description (简介): ${KEPT}.`)
+    } else if (description.trim()) f.notes.push('OneDraft couldn’t find the description box (简介): paste the description yourself.')
+    // Bilibili suggests tags of its own; the post's take their place (the page takes 10, each up to 20 characters).
+    const tags = [...new Set(content.tags.map((t) => cut(t.trim().replace(/^#/, ''), 20)).filter(Boolean))].slice(0, 10)
+    if (tags.length) {
+      const box = await f.maybe('tags', 8000)
+      if (!box) f.notes.push(`Add the tags: ${tags.join(', ')}.`)
+      else {
+        for (let i = 0; i < 12; i++) {
+          const suggested = await f.maybe('tagRemove', 500)
+          if (!suggested) break
+          await suggested.click({ timeout: 3000 }).catch(() => undefined)
+          await f.wait(300)
+        }
+        const left: string[] = []
+        for (const t of tags) {
+          if (!(await f.setValue(box, t))) {
+            left.push(t)
+            continue
+          }
+          await f.keys(() => box.press('Enter', { timeout: 5000 }))
+          await f.wait(400)
+        }
+        if (left.length) f.notes.push(`Add these tags: ${left.join(', ')}.`)
+      }
+    }
+    // The page's own choices, which OneDraft only reminds of.
+    const o = content.options
+    if (o.copyright === '2') f.notes.push(`Choose 转载 (Repost)${o.source ? ` and give the source: ${String(o.source)}` : ''}.`)
+    if (o.dynamic) f.notes.push(`Add the feed text (粉丝动态): ${String(o.dynamic)}`)
+    if (content.cover) f.notes.push(`To use your cover, set it under 封面: ${content.cover}`)
+    if (content.aiGenerated) f.notes.push(AI_NOTE.bilibili)
+    const go = 'press 立即投稿 (Submit) once the upload says 上传完成'
+    return publishAt
+      ? `Check the details and the category (分区). To post it at ${when(publishAt)}, turn on 定时发布 (scheduled), set that time, and ${go}.`
+      : `Check the details and the category (分区), and ${go}.`
   }
 }
 
@@ -646,7 +732,7 @@ export async function webPublish(platform: WebPlatform, ctx: ConnectorContext, a
   // What can't work is said before any window opens.
   const missing = content.media.find((m) => !existsSync(m))
   if (missing) throw new ContentError(`A file in this post is missing: ${missing}`)
-  if ((platform === 'youtube' || platform === 'tiktok') && !content.media.some(isVideo)) throw new ContentError(`${site.name} needs a video.`)
+  if ((platform === 'youtube' || platform === 'tiktok' || platform === 'bilibili') && !content.media.some(isVideo)) throw new ContentError(`${site.name} needs a video.`)
   if (platform === 'instagram' && !content.media.length) throw new ContentError('Instagram needs a photo or a video.')
   for (const i of webIssues(platform, content)) if (i.level === 'error') throw new ContentError(i.message)
   if (ctx.signal?.aborted) throw new CanceledError()
@@ -724,7 +810,7 @@ export async function webPublish(platform: WebPlatform, ctx: ConnectorContext, a
     await page.bringToFront().catch(() => undefined)
     return {
       state: 'handoff',
-      note: `OneDraft couldn’t fill in everything on ${site.name} (${short(e)}). The page is open in the ${site.name} window: finish the post there and press Post.`,
+      note: `OneDraft couldn’t fill in everything on ${site.name} (${short(e)}). The page is open in the ${site.name} window: finish the post there and press ${site.press ?? 'Post'}.`,
       closed: whenClosed(page, site)
     }
   } finally {
@@ -735,7 +821,7 @@ export async function webPublish(platform: WebPlatform, ctx: ConnectorContext, a
 /** The note a handed-over post gets once the person closes its tab (posted there or not). */
 const whenClosed = (page: Page, site: Site) =>
   new Promise<string>((resolve) =>
-    page.once('close', () => resolve(`The ${site.name} tab with this post was closed. If you didn’t press Post there, press “Post again”.`))
+    page.once('close', () => resolve(`The ${site.name} tab with this post was closed. If you didn’t press ${site.press ?? 'Post'} there, press “Post again”.`))
   )
 
 /** Fields and texts for a connector's manifest.web; `options` are the post options the website way uses. */

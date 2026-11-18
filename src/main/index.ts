@@ -99,7 +99,7 @@ async function main() {
   {
     const used = new Set(store.listAccounts().map((a) => a.meta.profileKey))
     const orphans = (existsSync(paths.profiles) ? readdirSync(paths.profiles) : []).filter(
-      (name) => /^(youtube|tiktok|instagram|x|rednote)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(name) && !used.has(name)
+      (name) => /^(youtube|tiktok|instagram|x|bilibili|rednote)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(name) && !used.has(name)
     )
     for (const name of orphans) void rm(join(paths.profiles, name), { recursive: true, force: true, maxRetries: 3, retryDelay: 500 }).catch(() => undefined)
   }

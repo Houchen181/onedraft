@@ -3,7 +3,7 @@
 // and the checks and background jobs that don't apply to these accounts. The browser tests use the installed Edge,
 // headless, and serve small local pages in place of the sites (nothing reaches them); without Edge they're skipped.
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -16,6 +16,7 @@ import { Inbox } from '../src/core/inbox'
 import { Registry } from '../src/core/registry'
 import { Store } from '../src/core/store'
 import { instagram } from '../src/connectors/instagram'
+import { rednote, rednoteSession } from '../src/connectors/rednote'
 import { tiktok } from '../src/connectors/tiktok'
 import { SITES, signedIn, webConnect, webPublish } from '../src/connectors/web'
 import { x } from '../src/connectors/x'
@@ -64,6 +65,9 @@ describe('website sign-in cookies', () => {
     expect(signedIn(SITES.instagram)([c('sessionid', 's', '.notinstagram.com')])).toBe(false)
     expect(signedIn(SITES.tiktok)([c('sessionid', 's', '.faketiktok.com')])).toBe(false)
     expect(signedIn(SITES.youtube)([c('SAPISID', 's', '.notyoutube.com')])).toBe(false)
+    expect(signedIn(SITES.bilibili)([c('SESSDATA', 's', '.notbilibili.com')])).toBe(false)
+    expect(signedIn(SITES.bilibili)([c('SESSDATA', 's', '.bilibili.com')])).toBe(true)
+    expect(SITES.bilibili.remoteId?.([c('SESSDATA', 's', '.bilibili.com'), c('DedeUserID', '3546', '.bilibili.com')])).toBe('3546')
   })
 
   it('give the account id only when the cookie holds a proper one', async () => {
@@ -255,15 +259,15 @@ describe.skipIf(!EDGE)('posting on a website page, in Edge', () => {
   const account = { id: 'a', platform: 'x', name: 'My X', status: 'connected', meta: { method: 'web', profileKey: 'k' } } as unknown as Account
   const content: ResolvedContent = { title: '', caption: 'hello', tags: ['tag'], media: [], options: {}, aiGenerated: false }
 
-  /** A headless browser where X's pages are the given HTML and every other request goes nowhere. */
-  async function site(pages: Record<string, string>): Promise<BrowserContext> {
+  /** A headless browser where the site's pages are the given HTML and every other request goes nowhere. */
+  async function site(pages: Record<string, string>, signIn = { name: 'auth_token', domain: '.x.com' }): Promise<BrowserContext> {
     const ctx = await chromium.launchPersistentContext(join(tempDir(), 'profile'), { channel: 'msedge', headless: true })
     await ctx.route('**/*', (route: Route) => {
       const url = route.request().url()
       const hit = Object.keys(pages).find((p) => url.startsWith(p))
       return hit ? route.fulfill({ contentType: 'text/html; charset=utf-8', body: pages[hit] }) : route.abort()
     })
-    await ctx.addCookies([{ name: 'auth_token', value: 't', domain: '.x.com', path: '/' }])
+    await ctx.addCookies([{ ...signIn, value: 't', path: '/' }])
     return ctx
   }
   const ctxFor = (browser: BrowserContext, signal?: AbortSignal) => {
@@ -284,6 +288,64 @@ describe.skipIf(!EDGE)('posting on a website page, in Edge', () => {
       const page = browser.pages().find((p) => p.url().startsWith('https://x.com/compose'))!
       expect((await page.locator('#box').innerText()).replace(/\s+/g, ' ').trim()).toBe('hello #tag')
       expect(await page.locator('#timeline').innerText()).toBe('')
+    } finally {
+      await browser.close()
+    }
+  }, 60_000)
+
+  it('fills in Bilibili’s upload page: its own title and suggested tags give way to the post’s', async () => {
+    // Like the creator centre's uploader: the form shows once a file is chosen, with the file name as the title and
+    // tags Bilibili suggests; the tag box adds a tag on Enter.
+    const page = `
+      <input type="file" accept=".mp4,.flv,.mov" style="display:none">
+      <div id="form" hidden>
+        <input type="text" class="input-val" maxlength="80" id="title">
+        <div class="tag-pre-wrp">
+          <div class="label-item-v2-container">生活<span class="label-item-v2-close">×</span></div>
+          <div class="label-item-v2-container">日常<span class="label-item-v2-close">×</span></div>
+        </div>
+        <input placeholder="按回车键Enter创建标签" id="tag">
+        <div class="ql-editor" contenteditable="true" id="desc"><p><br></p></div>
+      </div>
+      <script>
+        const file = document.querySelector('input[type=file]')
+        file.addEventListener('change', () => {
+          document.getElementById('form').hidden = false
+          document.getElementById('title').value = file.files[0].name
+        })
+        for (const x of document.querySelectorAll('.label-item-v2-close')) x.addEventListener('click', () => x.parentElement.remove())
+        const tag = document.getElementById('tag')
+        tag.addEventListener('keydown', (e) => {
+          if (e.key !== 'Enter' || !tag.value.trim()) return
+          const chip = document.createElement('div')
+          chip.className = 'label-item-v2-container'
+          chip.textContent = tag.value.trim()
+          document.querySelector('.tag-pre-wrp').append(chip)
+          tag.value = ''
+        })
+      </script>`
+    const browser = await site({ 'https://member.bilibili.com/platform/upload/video/frame': page }, { name: 'SESSDATA', domain: '.bilibili.com' })
+    const clip = join(tempDir(), 'clip.mp4')
+    writeFileSync(clip, 'not really a video')
+    const bili = { ...account, platform: 'bilibili', name: 'My Bilibili' } as Account
+    const post: ResolvedContent = {
+      title: 'My video',
+      caption: 'About it',
+      tags: ['first', '#second', 'first'],
+      media: [clip],
+      options: { copyright: '2', source: 'https://example.com/v' },
+      aiGenerated: true
+    }
+    try {
+      const r = await webPublish('bilibili', ctxFor(browser), bili, { targetId: 't', content: post })
+      expect(r.state).toBe('handoff')
+      expect(r.note).toMatch(/^Check the details and the category \(分区\), and press 立即投稿 \(Submit\) once the upload says 上传完成\./)
+      expect(r.note).toContain('Choose 转载 (Repost) and give the source: https://example.com/v.')
+      expect(r.note).toContain('AI-content declaration')
+      const tab = browser.pages().find((p) => p.url().startsWith('https://member.bilibili.com/'))!
+      expect(await tab.locator('#title').inputValue()).toBe('My video')
+      expect(await tab.locator('.tag-pre-wrp .label-item-v2-container').allInnerTexts()).toEqual(['first', 'second'])
+      expect((await tab.locator('#desc').innerText()).trim()).toBe('About it')
     } finally {
       await browser.close()
     }
@@ -314,5 +376,94 @@ describe.skipIf(!EDGE)('posting on a website page, in Edge', () => {
     setTimeout(() => void Promise.all(b2.pages().map((p) => p.close())), 1500)
     await expect(closing).rejects.toThrow(/window was closed before the post was ready/)
     await b2.close().catch(() => undefined)
+  }, 60_000)
+})
+
+describe('Rednote’s sign-in cookies', () => {
+  it('count only once someone signs in, and only on Rednote', () => {
+    // What a visitor gets on the creator site before signing in (seen 2026-11-17).
+    const visitor = ['a1', 'webId', 'gid', 'xsecappid', 'webBuild', 'loadts', 'websectiga', 'sec_poison_id', 'ets'].map((n) => c(n, 'v', '.xiaohongshu.com'))
+    expect(rednoteSession([...visitor, c('acw_tc', 'v', 'creator.xiaohongshu.com')])).toBe(false)
+    expect(rednoteSession([c('galaxy_creator_session_id', 's', '.xiaohongshu.com')])).toBe(true)
+    expect(rednoteSession([c('access-token-creator.xiaohongshu.com', 't', 'creator.xiaohongshu.com')])).toBe(true)
+    expect(rednoteSession([c('galaxy_creator_session_id', 's', '.notxiaohongshu.com')])).toBe(false)
+    expect(rednoteSession([c('galaxy_creator_session_id', '', '.xiaohongshu.com')])).toBe(false)
+  })
+})
+
+// The 0.1.4 report: signed in, but the window didn't close, and closing it left Rednote unconnected.
+describe.skipIf(!EDGE)('Rednote sign-in, in Edge', () => {
+  const LOGIN = '<div class="login-container"><div class="login-box-container">短信登录 扫码登录</div></div>'
+  const HOME = '<div class="home">创作服务平台</div>'
+
+  /** OneDraft's browser for these tests: each launch is a headless Edge on the account's profile, Rednote served here. */
+  function rednoteCtx() {
+    const root = tempDir()
+    const opened: BrowserContext[] = []
+    const forgotten: string[] = []
+    const ctx = fakeCtx({
+      browser: async (key: string) => {
+        const b = await chromium.launchPersistentContext(join(root, key), { channel: 'msedge', headless: true })
+        await b.route('**/*', (route: Route) => {
+          const url = route.request().url()
+          const body = url.startsWith('https://creator.xiaohongshu.com/login') ? LOGIN : url.startsWith('https://creator.xiaohongshu.com/new/home') ? HOME : undefined
+          return body ? route.fulfill({ contentType: 'text/html; charset=utf-8', body }) : route.abort()
+        })
+        opened.push(b)
+        return b
+      },
+      forgetBrowser: async (key: string) => void forgotten.push(key)
+    })
+    return { ctx, opened, forgotten }
+  }
+  const session = (expires?: number) =>
+    [
+      { name: 'galaxy_creator_session_id', value: 's' },
+      { name: 'x-user-id-creator.xiaohongshu.com', value: '5f00aa' }
+    ].map((k) => ({ ...k, domain: '.xiaohongshu.com', path: '/', ...(expires ? { expires } : {}) }))
+  /** Until OneDraft's window shows Rednote's sign-in page. */
+  const signInShown = async (opened: BrowserContext[]) => {
+    for (let i = 0; i < 150 && !opened[0]?.pages().some((p) => p.url().includes('/login')); i++) await new Promise((r) => setTimeout(r, 100))
+    return opened[0]
+  }
+
+  it('connects once Rednote’s sign-in cookie appears, even with the first tab still on the sign-in page', async () => {
+    const { ctx, opened } = rednoteCtx()
+    const connecting = rednote.connect(ctx, { label: 'Mine' })
+    const win = await signInShown(opened)
+    await win.addCookies(session())
+    const t0 = Date.now()
+    expect(await connecting).toMatchObject({ name: 'Mine', remoteUserId: '5f00aa' })
+    expect(Date.now() - t0).toBeLessThan(6000)
+  }, 60_000)
+
+  it('also connects on a creator page past the sign-in in another tab, should Rednote rename its cookies', async () => {
+    const { ctx, opened } = rednoteCtx()
+    const connecting = rednote.connect(ctx, {})
+    const win = await signInShown(opened)
+    await (await win.newPage()).goto('https://creator.xiaohongshu.com/new/home')
+    expect((await connecting).remoteUserId).toMatch(/^rednote-/)
+  }, 60_000)
+
+  it('connects when the window is closed right after signing in: the profile kept the sign-in', async () => {
+    const { ctx, opened, forgotten } = rednoteCtx()
+    const connecting = rednote.connect(ctx, {})
+    const win = await signInShown(opened)
+    // Signed in, and the window closed before OneDraft's next look.
+    await win.addCookies(session(Math.floor(Date.now() / 1000) + 86_400))
+    await win.close()
+    expect(await connecting).toMatchObject({ remoteUserId: '5f00aa' })
+    expect(opened).toHaveLength(2)
+    expect(forgotten).toEqual([])
+  }, 60_000)
+
+  it('says so when the window is closed without signing in, and deletes the new profile', async () => {
+    const { ctx, opened, forgotten } = rednoteCtx()
+    const connecting = rednote.connect(ctx, {})
+    connecting.catch(() => undefined)
+    const win = await signInShown(opened)
+    await win.close()
+    await expect(connecting).rejects.toThrow('The sign-in window was closed before you finished signing in.')
+    expect(forgotten).toHaveLength(1)
   }, 60_000)
 })
